@@ -699,6 +699,8 @@ foreach ($test in $tests) {
         Write-UiStatus -Label "CAS" -Message "Réutilisé" -Color DarkGreen
     }
 
+    Remove-Item -LiteralPath $runLogPath -Force -ErrorAction SilentlyContinue
+
     try {
         & $RunTestScript -Id $id -Case $casePath -PromptPath $promptPath -AllowUntrackedCase -Embedded
 

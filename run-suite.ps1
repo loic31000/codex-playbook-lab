@@ -7,11 +7,105 @@ $OutputEncoding = [Console]::OutputEncoding
 $ErrorActionPreference = "Stop"
 
 $RepoPath = (Get-Location).Path
+$RepoName = Split-Path $RepoPath -Leaf
 $RunTestScript = Join-Path $RepoPath "run-test.ps1"
 $BackupRoot = Join-Path (Split-Path $RepoPath -Parent) "codex-playbook-test-runs"
 $GeneratedCasesRoot = Join-Path $BackupRoot "generated-cases"
 $SummaryPath = Join-Path $BackupRoot "suite-summary.md"
 $ManifestPath = Join-Path $BackupRoot "generated-manifest.json"
+
+function Write-AppHeader {
+    param(
+        [string]$ScriptName,
+        [string]$Subtitle
+    )
+
+    Write-Host ""
+    Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor DarkCyan
+    Write-Host ("║  {0,-58}║" -f $RepoName) -ForegroundColor Cyan
+    Write-Host ("║  {0,-58}║" -f $ScriptName) -ForegroundColor White
+    Write-Host ("║  {0,-58}║" -f $Subtitle) -ForegroundColor DarkGray
+    Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Write-UiStatus {
+    param(
+        [string]$Label,
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+
+    Write-Host ("  [{0}] " -f $Label) -NoNewline -ForegroundColor $Color
+    Write-Host $Message
+}
+
+function Format-Elapsed {
+    param([TimeSpan]$Elapsed)
+    return ("{0:00}:{1:00}" -f [int]$Elapsed.TotalMinutes, $Elapsed.Seconds)
+}
+
+function Invoke-CodexProcess {
+    param(
+        [string]$InputFile,
+        [string]$FinalFile,
+        [string]$LogFile,
+        [string]$ActivityLabel
+    )
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $FinalFile + '" -'
+    $started = Get-Date
+
+    try {
+        $process = Start-Process `
+            -FilePath $env:ComSpec `
+            -ArgumentList @("/d", "/s", "/c", $codexCommand) `
+            -RedirectStandardInput $InputFile `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile `
+            -NoNewWindow `
+            -PassThru
+
+        $lastHeartbeat = -5
+
+        while (-not $process.HasExited) {
+            Start-Sleep -Milliseconds 500
+            $elapsed = (Get-Date) - $started
+
+            if ([int]$elapsed.TotalSeconds -ge ($lastHeartbeat + 5)) {
+                $lastHeartbeat = [int]$elapsed.TotalSeconds
+                Write-Host ("      ⏳ {0} — {1}" -f (Format-Elapsed $elapsed), $ActivityLabel) -ForegroundColor DarkYellow
+            }
+        }
+
+        $process.WaitForExit()
+
+        $stdout = if (Test-Path -LiteralPath $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
+        $combined = $stdout
+
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            if (-not [string]::IsNullOrWhiteSpace($combined)) {
+                $combined += [Environment]::NewLine
+            }
+
+            $combined += $stderr
+        }
+
+        Write-Utf8NoBom -Path $LogFile -Content $combined
+
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Elapsed = ((Get-Date) - $started)
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function Write-Utf8NoBom {
     param(
@@ -295,20 +389,13 @@ Retourne uniquement le Markdown du cas de test.
 
     Write-Utf8NoBom -Path $inputFile -Content $generatorInput
 
-    $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $finalFile + '" - 2>&1'
+    $generationRun = Invoke-CodexProcess `
+        -InputFile $inputFile `
+        -FinalFile $finalFile `
+        -LogFile $GenerationLogPath `
+        -ActivityLabel "Génération du cas — Codex travaille toujours..."
 
-    $previousErrorActionPreference = $ErrorActionPreference
-
-    try {
-        $ErrorActionPreference = "Continue"
-        $generationOutput = Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand | Out-String
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    Write-Utf8NoBom -Path $GenerationLogPath -Content $generationOutput
+    $exitCode = $generationRun.ExitCode
 
     if ($exitCode -ne 0) {
         $logText = ""
@@ -335,7 +422,7 @@ Retourne uniquement le Markdown du cas de test.
 
     Write-Utf8NoBom -Path $CasePath -Content ($generated + [Environment]::NewLine)
     Remove-Item -LiteralPath $tempRoot -Recurse -Force
-    Write-Host "    [OK] Cas généré"
+    Write-Host ("    ✓ Cas généré en {0}" -f (Format-Elapsed $generationRun.Elapsed)) -ForegroundColor Green
 }
 
 function Write-ResultPackage {
@@ -501,14 +588,10 @@ $stoppedForLimit = $false
 $stoppedForInfrastructure = $false
 $position = 0
 
-Write-Host ""
-Write-Host "============================================================"
-Write-Host "SUITE CODEX AUTOMATIQUE"
-Write-Host "============================================================"
-Write-Host ""
-Write-Host "Prompts détectés : $($prompts.Count)"
-Write-Host "Cas par prompt   : $casesPerPrompt"
-Write-Host "Tests à traiter  : $($tests.Count)"
+Write-AppHeader -ScriptName "run-suite.ps1 • Suite automatique" -Subtitle "Tests A/B des prompts Codex"
+Write-Host ("  Prompts détectés : {0}" -f $prompts.Count) -ForegroundColor Gray
+Write-Host ("  Cas par prompt   : {0}" -f $casesPerPrompt) -ForegroundColor Gray
+Write-Host ("  Tests à traiter  : {0}" -f $tests.Count) -ForegroundColor White
 Write-Host ""
 
 foreach ($test in $tests) {
@@ -525,7 +608,9 @@ foreach ($test in $tests) {
     $generationLogPath = Join-Path $GeneratedCasesRoot "$id-generation.log"
 
     if ((Test-Path -LiteralPath $baselinePath) -and (Test-Path -LiteralPath $withPromptPath) -and (Test-Path -LiteralPath $comparisonPath)) {
-        Write-Host ("[{0}/{1}] {2} -> DÉJÀ TERMINÉ" -f $position, $tests.Count, $promptRelativePath)
+        Write-Host ("[{0}/{1}] " -f $position, $tests.Count) -NoNewline -ForegroundColor DarkGray
+        Write-Host $promptRelativePath -NoNewline -ForegroundColor White
+        Write-Host "  ✓ DÉJÀ TERMINÉ" -ForegroundColor DarkGreen
         Write-ResultPackage -Id $id -PromptRelativePath $promptRelativePath -CasePath $casePath -BaselinePath $baselinePath -WithPromptPath $withPromptPath -ComparisonPath $comparisonPath
 
         $results += [pscustomobject]@{
@@ -539,10 +624,11 @@ foreach ($test in $tests) {
     }
 
     Write-Host ""
-    Write-Host ("[{0}/{1}] {2}" -f $position, $tests.Count, $promptRelativePath)
+    Write-Host ("[{0}/{1}] " -f $position, $tests.Count) -NoNewline -ForegroundColor DarkGray
+    Write-Host $promptRelativePath -ForegroundColor Cyan
 
     if (-not (Test-Path -LiteralPath $casePath -PathType Leaf)) {
-        Write-Host "  [CAS] Génération..."
+        Write-UiStatus -Label "CAS" -Message "Génération..." -Color Yellow
 
         try {
             Invoke-CaseGeneration -Id $id -PromptRelativePath $promptRelativePath -PromptBlock $test.PromptBlock -CasePath $casePath -GenerationLogPath $generationLogPath
@@ -592,7 +678,7 @@ foreach ($test in $tests) {
             }
 
             Write-Host ""
-            Write-Host ("  [ÉCHEC] Génération du cas (voir {0})" -f (Split-Path $generationLogPath -Leaf))
+            Write-Host ("  ✗ Génération du cas — voir {0}" -f (Split-Path $generationLogPath -Leaf)) -ForegroundColor Red
 
             $results += [pscustomobject]@{
                 Id = $id
@@ -605,11 +691,11 @@ foreach ($test in $tests) {
         }
     }
     else {
-        Write-Host "  [CAS] Réutilisé"
+        Write-UiStatus -Label "CAS" -Message "Réutilisé" -Color DarkGreen
     }
 
     try {
-        & $RunTestScript -Id $id -Case $casePath -PromptPath $promptPath -AllowUntrackedCase *>&1 | Tee-Object -FilePath $runLogPath
+        & $RunTestScript -Id $id -Case $casePath -PromptPath $promptPath -AllowUntrackedCase -Embedded *>&1 | Tee-Object -FilePath $runLogPath
 
         Write-ResultPackage -Id $id -PromptRelativePath $promptRelativePath -CasePath $casePath -BaselinePath $baselinePath -WithPromptPath $withPromptPath -ComparisonPath $comparisonPath
 
@@ -681,7 +767,7 @@ foreach ($test in $tests) {
         }
 
         Write-Host ""
-        Write-Host ("  [ÉCHEC] Test {0} : {1}" -f $id, $message)
+        Write-Host ("  ✗ Test {0} : {1}" -f $id, $message) -ForegroundColor Red
 
         $results += [pscustomobject]@{
             Id = $id
@@ -760,19 +846,19 @@ foreach ($result in $results) {
 Write-Utf8NoBom -Path $SummaryPath -Content ($lines -join [Environment]::NewLine)
 
 Write-Host ""
-Write-Host "============================================================"
+Write-Host "────────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
 
 if ($stoppedForLimit) {
-    Write-Host "SUITE ARRÊTÉE : LIMITE CODEX"
+    Write-Host "  SUITE ARRÊTÉE • LIMITE CODEX" -ForegroundColor Yellow
 }
 elseif ($stoppedForInfrastructure) {
-    Write-Host "SUITE ARRÊTÉE : INFRASTRUCTURE CODEX"
+    Write-Host "  SUITE ARRÊTÉE • INFRASTRUCTURE CODEX" -ForegroundColor Red
 }
 else {
-    Write-Host "SUITE TERMINÉE"
+    Write-Host "  ✓ SUITE TERMINÉE" -ForegroundColor Green
 }
 
-Write-Host "============================================================"
+Write-Host "────────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
 Write-Host ""
 Write-Host "Prompts détectés      : $($prompts.Count)"
 Write-Host "OK                    : $okCount"

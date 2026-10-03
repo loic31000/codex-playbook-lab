@@ -269,12 +269,15 @@ $caseContent = Read-Utf8Text -Path $Case
 $baselineInput = @"
 Exécute la demande décrite dans le cas de test ci-dessous.
 Utilise le repository comme contexte et modifie le code uniquement si le cas le demande.
+Sous Windows PowerShell 5.1, si tu lis un fichier texte, lis-le explicitement en UTF-8 afin de préserver les accents.
 
 $caseContent
 "@
 
 $withPromptInput = @"
 $promptBlock
+
+Contrainte d'environnement : sous Windows PowerShell 5.1, si tu lis un fichier texte, lis-le explicitement en UTF-8 afin de préserver les accents.
 
 Cas de test à traiter :
 

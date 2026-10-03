@@ -96,6 +96,35 @@ function Test-IsCodexLimitError {
     return $false
 }
 
+function Test-IsFatalInfrastructureError {
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    $patterns = @(
+        '(?i)unexpected argument',
+        '(?i)command.+codex.+introuvable',
+        '(?i)codex.+not recognized',
+        '(?i)command not found',
+        '(?i)not logged in',
+        '(?i)authentication failed',
+        '(?i)unauthorized',
+        '(?i)invalid api key'
+    )
+
+    foreach ($pattern in $patterns) {
+        if ($Text -match $pattern) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-PromptBlock {
     param(
         [string]$Path
@@ -471,6 +500,7 @@ Write-Utf8NoBom -Path $ManifestPath -Content ($manifest | ConvertTo-Json -Depth 
 $results = @()
 $startedAt = Get-Date
 $stoppedForLimit = $false
+$stoppedForInfrastructure = $false
 
 Write-Host ""
 Write-Host "============================================================"
@@ -540,6 +570,23 @@ foreach ($test in $tests) {
                 break
             }
 
+            if (Test-IsFatalInfrastructureError -Text $message) {
+                Write-Host ""
+                Write-Host "[$id] ERREUR INFRASTRUCTURE CODEX"
+                Write-Host "La suite s'arrête pour éviter de gaspiller des exécutions."
+                Write-Host "Corrige Codex CLI puis relance .\run-suite.ps1."
+
+                $results += [pscustomobject]@{
+                    Id = $id
+                    Prompt = $promptRelativePath
+                    Status = "ARRÊT INFRA"
+                    Detail = $message
+                }
+
+                $stoppedForInfrastructure = $true
+                break
+            }
+
             Write-Host ""
             Write-Host "[$id] ÉCHEC GÉNÉRATION : $message"
 
@@ -603,6 +650,23 @@ foreach ($test in $tests) {
             break
         }
 
+        if (Test-IsFatalInfrastructureError -Text $combinedError) {
+            Write-Host ""
+            Write-Host "[$id] ERREUR INFRASTRUCTURE CODEX"
+            Write-Host "La suite s'arrête pour éviter de gaspiller des exécutions."
+            Write-Host "Corrige Codex CLI puis relance .\run-suite.ps1."
+
+            $results += [pscustomobject]@{
+                Id = $id
+                Prompt = $promptRelativePath
+                Status = "ARRÊT INFRA"
+                Detail = $message
+            }
+
+            $stoppedForInfrastructure = $true
+            break
+        }
+
         Write-Host ""
         Write-Host "[$id] ÉCHEC : $message"
 
@@ -624,6 +688,7 @@ $doneCount = @($results | Where-Object { $_.Status -eq "DÉJÀ TERMINÉ" }).Coun
 $generationFailedCount = @($results | Where-Object { $_.Status -eq "ÉCHEC GÉNÉRATION" }).Count
 $failedCount = @($results | Where-Object { $_.Status -eq "ÉCHEC" }).Count
 $limitStopCount = @($results | Where-Object { $_.Status -eq "ARRÊT LIMITE" }).Count
+$infraStopCount = @($results | Where-Object { $_.Status -eq "ARRÊT INFRA" }).Count
 
 $lines = @(
     "# Résultats de la suite automatique",
@@ -642,7 +707,8 @@ $lines = @(
     "- Déjà terminés : $doneCount",
     "- Échecs de génération : $generationFailedCount",
     "- Échecs de test : $failedCount",
-    "- Arrêts quota/rate limit : $limitStopCount"
+    "- Arrêts quota/rate limit : $limitStopCount",
+    "- Arrêts infrastructure : $infraStopCount"
 )
 
 if ($stoppedForLimit) {
@@ -653,6 +719,16 @@ if ($stoppedForLimit) {
         "La suite a été arrêtée proprement après détection d'une limite Codex.",
         "",
         "Relance simplement .\run-suite.ps1 après réinitialisation de la limite."
+    )
+}
+elseif ($stoppedForInfrastructure) {
+    $lines += @(
+        "",
+        "## Suite interrompue",
+        "",
+        "La suite a été arrêtée sur une erreur d'infrastructure Codex pour éviter de gaspiller des exécutions.",
+        "",
+        "Corrige Codex CLI puis relance simplement .\run-suite.ps1."
     )
 }
 
@@ -676,6 +752,9 @@ Write-Host "============================================================"
 if ($stoppedForLimit) {
     Write-Host "SUITE ARRÊTÉE : LIMITE CODEX"
 }
+elseif ($stoppedForInfrastructure) {
+    Write-Host "SUITE ARRÊTÉE : INFRASTRUCTURE CODEX"
+}
 else {
     Write-Host "SUITE TERMINÉE"
 }
@@ -688,6 +767,7 @@ Write-Host "Déjà terminés         : $doneCount"
 Write-Host "Échecs génération     : $generationFailedCount"
 Write-Host "Échecs test           : $failedCount"
 Write-Host "Arrêts limite Codex   : $limitStopCount"
+Write-Host "Arrêts infrastructure : $infraStopCount"
 Write-Host "Résumé                : $SummaryPath"
 Write-Host "Manifest              : $ManifestPath"
 Write-Host ""

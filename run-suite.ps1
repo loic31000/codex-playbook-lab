@@ -42,7 +42,8 @@ function Write-UiStatus {
 
 function Format-Elapsed {
     param([TimeSpan]$Elapsed)
-    return ("{0:00}:{1:00}" -f [int]$Elapsed.TotalMinutes, $Elapsed.Seconds)
+    $minutes = [math]::Floor($Elapsed.TotalMinutes)
+    return ("{0:00}:{1:00}" -f [int]$minutes, $Elapsed.Seconds)
 }
 
 function Invoke-CodexProcess {
@@ -82,6 +83,16 @@ function Invoke-CodexProcess {
         }
 
         $process.WaitForExit()
+        $process.Refresh()
+
+        $resolvedExitCode = $null
+
+        try {
+            $resolvedExitCode = [int]$process.ExitCode
+        }
+        catch {
+            $resolvedExitCode = $null
+        }
 
         $stdout = if (Test-Path -LiteralPath $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
         $stderr = if (Test-Path -LiteralPath $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
@@ -98,7 +109,7 @@ function Invoke-CodexProcess {
         Write-Utf8NoBom -Path $LogFile -Content $combined
 
         return [pscustomobject]@{
-            ExitCode = $process.ExitCode
+            ExitCode = $resolvedExitCode
             Elapsed = ((Get-Date) - $started)
         }
     }
@@ -627,7 +638,7 @@ Retourne uniquement le Markdown du cas de test.
     if (-not [string]::IsNullOrWhiteSpace($generated)) {
         Write-Utf8NoBom -Path $CasePath -Content ($generated + [Environment]::NewLine)
 
-        if ($exitCode -eq 0) {
+        if (($null -eq $exitCode) -or ($exitCode -eq 0)) {
             Write-Host ("    ✓ Cas généré en {0}" -f (Format-Elapsed $generationRun.Elapsed)) -ForegroundColor Green
         }
         else {

@@ -100,7 +100,6 @@ function Invoke-CodexTestRun {
 
     $codexArgs = @(
         "exec",
-        "--full-auto",
         "--ephemeral",
         "--color",
         "never",
@@ -140,6 +139,50 @@ function Invoke-CodexTestRun {
 
     if ($codexExitCode -ne 0) {
         throw "Codex a terminé avec le code $codexExitCode pendant '$RunName'. Le run a quand même été sauvegardé."
+    }
+}
+
+function Get-SavedRunExitCode {
+    param(
+        [string]$RunPath
+    )
+
+    $exitCodePath = Join-Path $RunPath "codex-exit-code.txt"
+
+    if (-not (Test-Path -LiteralPath $exitCodePath -PathType Leaf)) {
+        return $null
+    }
+
+    $raw = (Read-Utf8Text -Path $exitCodePath).Trim()
+    $value = 0
+
+    if ([int]::TryParse($raw, [ref]$value)) {
+        return $value
+    }
+
+    return $null
+}
+
+function Remove-InvalidSavedRun {
+    param(
+        [string]$RunPath,
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $RunPath)) {
+        return
+    }
+
+    $exitCode = Get-SavedRunExitCode -RunPath $RunPath
+
+    if (($null -eq $exitCode) -or ($exitCode -ne 0)) {
+        Write-Host ""
+        Write-Host "$Label invalide détecté. Suppression avant reprise."
+        Remove-Item -LiteralPath $RunPath -Recurse -Force
+
+        if (Test-Path -LiteralPath $ComparisonPath) {
+            Remove-Item -LiteralPath $ComparisonPath -Force
+        }
     }
 }
 
@@ -198,6 +241,9 @@ if (-not (Test-Path -LiteralPath $PromptPath -PathType Leaf)) {
 }
 
 Assert-CleanRepository
+
+Remove-InvalidSavedRun -RunPath $BaselineRunPath -Label "Baseline"
+Remove-InvalidSavedRun -RunPath $WithPromptRunPath -Label "Run avec prompt"
 
 $baselineExists = Test-Path -LiteralPath $BaselineRunPath
 $withPromptExists = Test-Path -LiteralPath $WithPromptRunPath

@@ -100,24 +100,32 @@ Les résultats restent hors du dépôt Git :
 ..\codex-playbook-test-runs\
 ```
 
-Principaux fichiers :
+Les résultats sont regroupés dans un dossier lisible par prompt :
 
 ```text
 suite-summary.md
 generated-manifest.json
-generated-cases\
-auto-xxxxxxxxxxxx-result.md
-auto-xxxxxxxxxxxx-baseline\
-auto-xxxxxxxxxxxx-with-prompt\
-auto-xxxxxxxxxxxx-comparison.diff
+
+01-04-inconnues-hypotheses\
+  result.md
+  case.md
+  diff.patch
+  generation.log
+  fingerprint.txt
+  base\
+  prompt\
 ```
 
-Le fichier `auto-xxxxxxxxxxxx-result.md` rassemble pour un test :
+Le nom du dossier reprend la section, le numéro du prompt et un titre court. Le hash technique reste uniquement dans les métadonnées internes.
+
+`result.md` rassemble pour un test :
 
 - le cas généré ;
 - la sortie baseline ;
 - la sortie avec prompt ;
 - le diff des fichiers produits.
+
+Les anciens résultats nommés `auto-...` sont migrés automatiquement vers cette structure lors du prochain lancement.
 
 Les anciens cas manuels dans `tests-cases\` peuvent rester comme historique, mais ils ne sont plus nécessaires au fonctionnement automatique.
 

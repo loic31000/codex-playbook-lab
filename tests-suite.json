@@ -1,0 +1,20 @@
+[
+  {
+    "id": "001",
+    "case": "tests-cases/001-add-task.md",
+    "prompt": "../codex-engineering-playbook-fr/09-Implementation/01 - Implementer Story.md",
+    "enabled": true
+  },
+  {
+    "id": "002",
+    "case": "tests-cases/002-task-priority.md",
+    "prompt": "../codex-engineering-playbook-fr/09-Implementation/01 - Implementer Story.md",
+    "enabled": true
+  },
+  {
+    "id": "003",
+    "case": "tests-cases/003-task-list.md",
+    "prompt": "../codex-engineering-playbook-fr/09-Implementation/01 - Implementer Story.md",
+    "enabled": true
+  }
+]

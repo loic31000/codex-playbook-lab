@@ -1,46 +1,10 @@
 # Codex Playbook Tests
 
-Projet fictif utilisé pour tester les prompts du Codex Engineering Playbook.
+Banc de test automatique pour les prompts du Codex Engineering Playbook.
 
-## Fonctionnement
+## Utilisation normale
 
-Le système comporte quatre éléments :
-
-```text
-run-test.ps1
-= exécute un test complet
-
-run-suite.ps1
-= enchaîne tous les tests
-
-tests-suite.json
-= liste les cas et les prompts à tester
-
-..\codex-playbook-test-runs\
-= conserve les résultats
-```
-
-Chaque test est exécuté deux fois avec le même cas.
-
-### Baseline
-
-Codex reçoit uniquement le cas de test.
-
-### Avec prompt
-
-Le script lit automatiquement le fichier indiqué par `prompt` dans `tests-suite.json`, extrait la section :
-
-```text
-## Prompt prêt à copier
-```
-
-puis envoie ce prompt avec exactement le même cas de test.
-
-Aucun prompt n'est copié manuellement dans Codex.
-
-## Lancer toute la suite
-
-Depuis la racine du dépôt :
+Depuis la racine de ce dépôt :
 
 ```powershell
 git pull --ff-only origin main
@@ -48,103 +12,113 @@ git status
 .\run-suite.ps1
 ```
 
-Le dépôt doit être propre avant le lancement.
+C'est tout.
 
-La suite continue d'un test à l'autre pour les erreurs normales.
+Tu n'as plus à écrire les cas de test un par un.
 
-Les tests déjà terminés sont ignorés lors d'une nouvelle exécution.
+## Ce que fait run-suite.ps1
 
-Si un test a été interrompu après le baseline, `run-test.ps1` reprend au run avec prompt.
+Le script :
 
-### Quota et rate limit Codex
+1. trouve automatiquement le playbook ;
+2. scanne tous les fichiers Markdown ;
+3. garde les fichiers `format: prompt` contenant `## Prompt prêt à copier` ;
+4. génère automatiquement un cas fictif adapté à chaque prompt ;
+5. lance Codex sans le prompt ;
+6. remet le dépôt dans son état initial ;
+7. lance Codex avec le même cas et le prompt ;
+8. génère la comparaison ;
+9. passe au prompt suivant ;
+10. écrit un résumé global.
 
-Si Codex renvoie une erreur de quota ou de rate limit, `run-suite.ps1` :
+Schéma :
 
-1. détecte la limite ;
-2. arrête proprement la suite ;
-3. retire uniquement le run incomplet provoqué par la limite ;
-4. conserve tous les runs déjà valides ;
-5. inscrit `ARRÊT LIMITE` dans `suite-summary.md`.
+```text
+playbook
+   |
+   v
+détection des prompts
+   |
+   v
+génération automatique du cas
+   |
+   +--> baseline sans prompt
+   |
+   +--> même cas avec prompt
+   |
+   v
+comparaison
+   |
+   v
+prompt suivant
+   |
+   v
+suite-summary.md
+```
 
-Après réinitialisation de la limite, relance simplement :
+## Configuration
+
+`tests-suite.json` ne contient plus la liste des tests.
+
+Il contient seulement la configuration :
+
+```json
+{
+  "playbook_path": "../codex-engineering-playbook-fr",
+  "cases_per_prompt": 1
+}
+```
+
+`cases_per_prompt: 1` signifie qu'un cas fictif est généré pour chaque prompt.
+
+## Reprise automatique
+
+Les résultats ont un identifiant calculé à partir du chemin et du contenu du prompt.
+
+Donc :
+
+- un test déjà terminé est sauté ;
+- un test interrompu reprend à l'étape manquante ;
+- si le texte du prompt change, un nouvel identifiant est créé et le prompt est retesté ;
+- les anciens résultats restent disponibles.
+
+Si Codex atteint une limite de quota ou de rate limit, la suite s'arrête proprement.
+
+Après réinitialisation de la limite :
 
 ```powershell
 .\run-suite.ps1
 ```
 
-Les tests terminés sont sautés et le test interrompu reprend automatiquement.
-
-## Configurer les tests
-
-Les tests à exécuter sont déclarés dans `tests-suite.json`.
-
-Exemple :
-
-```json
-[
-  {
-    "id": "004",
-    "case": "tests-cases/004-code-review.md",
-    "prompt": "../codex-engineering-playbook-fr/11-Review-Convergence/01 - Code review.md",
-    "enabled": true
-  }
-]
-```
-
-Champs :
-
-- `id` : identifiant unique du test ;
-- `case` : cas de test ;
-- `prompt` : fichier du prompt à tester ;
-- `enabled` : permet d'activer ou désactiver le test.
-
-Utilise un nouvel `id` si le scénario ou le prompt testé change.
+La suite reprend automatiquement.
 
 ## Résultats
 
-Les résultats sont enregistrés dans :
+Les résultats restent hors du dépôt Git :
 
 ```text
 ..\codex-playbook-test-runs\
 ```
 
-Pour un test `004` :
-
-```text
-004-baseline\
-004-with-prompt\
-004-comparison.diff
-```
-
-Après la suite complète ou un arrêt propre :
+Principaux fichiers :
 
 ```text
 suite-summary.md
+generated-manifest.json
+generated-cases\
+auto-xxxxxxxxxxxx-result.md
+auto-xxxxxxxxxxxx-baseline\
+auto-xxxxxxxxxxxx-with-prompt\
+auto-xxxxxxxxxxxx-comparison.diff
 ```
 
-Ce fichier résume les tests terminés, ignorés, échoués et les arrêts liés aux limites Codex.
+Le fichier `auto-xxxxxxxxxxxx-result.md` rassemble pour un test :
 
-Un fichier local `XXX-suite.log` conserve aussi la sortie du test utilisée pour diagnostiquer une erreur de limite.
+- le cas généré ;
+- la sortie baseline ;
+- la sortie avec prompt ;
+- le diff des fichiers produits.
 
-## Lancer un seul test
-
-```powershell
-.\run-test.ps1 `
-  -Id "004" `
-  -Case "tests-cases/004-code-review.md" `
-  -PromptPath "..\codex-engineering-playbook-fr\11-Review-Convergence\01 - Code review.md"
-```
+Les anciens cas manuels dans `tests-cases\` peuvent rester comme historique, mais ils ne sont plus nécessaires au fonctionnement automatique.
 
 Guide détaillé : [GUIDE-TESTS-CODEX.md](GUIDE-TESTS-CODEX.md)
-
-## Projet fictif
-
-Petite API de gestion de tâches.
-
-Fonctionnalités prévues :
-
-- créer une tâche ;
-- lister les tâches ;
-- terminer une tâche.
-
-Le projet reste volontairement simple afin de pouvoir rejouer les mêmes tests avec Codex.

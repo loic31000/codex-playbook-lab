@@ -7,7 +7,9 @@
     [string]$Case,
 
     [Parameter(Mandatory = $true)]
-    [string]$PromptPath
+    [string]$PromptPath,
+
+    [switch]$AllowUntrackedCase
 )
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -182,11 +184,13 @@ if (-not (Test-Path -LiteralPath $Case -PathType Leaf)) {
     throw "Cas de test introuvable : $Case"
 }
 
-$caseGitPath = $Case -replace '\\', '/'
-git ls-files --error-unmatch -- $caseGitPath *> $null
+if (-not $AllowUntrackedCase) {
+    $caseGitPath = $Case -replace '\\', '/'
+    git ls-files --error-unmatch -- $caseGitPath *> $null
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Le cas de test doit être commité dans Git avant le test : $Case"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Le cas de test doit être commité dans Git avant le test : $Case"
+    }
 }
 
 if (-not (Test-Path -LiteralPath $PromptPath -PathType Leaf)) {

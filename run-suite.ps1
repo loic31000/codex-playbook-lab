@@ -48,6 +48,109 @@ function Escape-MarkdownCell {
     return (($Value -replace '\|', '\|') -replace '[\r\n]+', ' ')
 }
 
+function Test-IsCodexLimitError {
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    $patterns = @(
+        '(?i)\b429\b',
+        '(?i)rate[ _-]?limit',
+        '(?i)too many requests',
+        '(?i)usage[ _-]?limit',
+        '(?i)usage limit reached',
+        '(?i)limit reached',
+        '(?i)insufficient_quota',
+        '(?i)credit_balance_exhausted',
+        '(?i)organization_usage_limit_exceeded',
+        '(?i)organization_spend_limit_exceeded',
+        '(?i)project_spend_limit_exceeded',
+        '(?i)quota exceeded',
+        '(?i)quota.*exhausted',
+        '(?i)you.?ve hit.*limit',
+        '(?i)you have hit.*limit',
+        '(?i)slow_down'
+    )
+
+    foreach ($pattern in $patterns) {
+        if ($Text -match $pattern) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-RunExitCode {
+    param(
+        [string]$RunPath
+    )
+
+    $exitCodePath = Join-Path $RunPath "codex-exit-code.txt"
+
+    if (-not (Test-Path -LiteralPath $exitCodePath -PathType Leaf)) {
+        return $null
+    }
+
+    $raw = (Get-Content -LiteralPath $exitCodePath -Raw).Trim()
+    $value = 0
+
+    if ([int]::TryParse($raw, [ref]$value)) {
+        return $value
+    }
+
+    return $null
+}
+
+function Remove-LimitInterruptedArtifacts {
+    param(
+        [string]$BaselinePath,
+        [string]$WithPromptPath,
+        [string]$ComparisonPath
+    )
+
+    $removed = ""
+
+    if (Test-Path -LiteralPath $WithPromptPath) {
+        $withPromptExitCode = Get-RunExitCode -RunPath $WithPromptPath
+
+        if (($null -ne $withPromptExitCode) -and ($withPromptExitCode -ne 0)) {
+            Remove-Item -LiteralPath $WithPromptPath -Recurse -Force
+            $removed = "run avec prompt"
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($removed) -and (Test-Path -LiteralPath $BaselinePath)) {
+        $baselineExitCode = Get-RunExitCode -RunPath $BaselinePath
+
+        if (($null -ne $baselineExitCode) -and ($baselineExitCode -ne 0)) {
+            Remove-Item -LiteralPath $BaselinePath -Recurse -Force
+            $removed = "baseline"
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($removed)) {
+        if ((Test-Path -LiteralPath $WithPromptPath) -and (-not (Test-Path -LiteralPath $ComparisonPath))) {
+            Remove-Item -LiteralPath $WithPromptPath -Recurse -Force
+            $removed = "run avec prompt"
+        }
+        elseif ((Test-Path -LiteralPath $BaselinePath) -and (-not (Test-Path -LiteralPath $WithPromptPath))) {
+            Remove-Item -LiteralPath $BaselinePath -Recurse -Force
+            $removed = "baseline"
+        }
+    }
+
+    if ((-not [string]::IsNullOrWhiteSpace($removed)) -and (Test-Path -LiteralPath $ComparisonPath)) {
+        Remove-Item -LiteralPath $ComparisonPath -Force
+    }
+
+    return $removed
+}
+
 if (-not (Test-Path ".git")) {
     throw "Lance ce script depuis la racine de codex-playbook-tests."
 }
@@ -108,6 +211,8 @@ New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
 
 $results = @()
 $startedAt = Get-Date
+$stoppedForLimit = $false
+$stopDetail = ""
 
 Write-Host ""
 Write-Host "============================================================"
@@ -144,12 +249,9 @@ foreach ($test in $tests) {
     $baselinePath = Join-Path $BackupRoot "$id-baseline"
     $withPromptPath = Join-Path $BackupRoot "$id-with-prompt"
     $comparisonPath = Join-Path $BackupRoot "$id-comparison.diff"
+    $runLogPath = Join-Path $BackupRoot "$id-suite.log"
 
-    if (
-        (Test-Path -LiteralPath $baselinePath) -and
-        (Test-Path -LiteralPath $withPromptPath) -and
-        (Test-Path -LiteralPath $comparisonPath)
-    ) {
+    if ((Test-Path -LiteralPath $baselinePath) -and (Test-Path -LiteralPath $withPromptPath) -and (Test-Path -LiteralPath $comparisonPath)) {
         Write-Host "[$id] déjà terminé, passage au suivant."
 
         $results += [pscustomobject]@{
@@ -171,7 +273,7 @@ foreach ($test in $tests) {
     Write-Host "------------------------------------------------------------"
 
     try {
-        & $RunTestScript -Id $id -Case $case -PromptPath $prompt
+        & $RunTestScript -Id $id -Case $case -PromptPath $prompt *>&1 | Tee-Object -FilePath $runLogPath
 
         $results += [pscustomobject]@{
             Id = $id
@@ -183,17 +285,66 @@ foreach ($test in $tests) {
     }
     catch {
         $message = $_.Exception.Message
+        $logText = ""
 
-        Write-Host ""
-        Write-Host "[$id] ÉCHEC : $message"
-
-        $results += [pscustomobject]@{
-            Id = $id
-            Case = $case
-            Prompt = $prompt
-            Status = "ÉCHEC"
-            Detail = $message
+        if (Test-Path -LiteralPath $runLogPath -PathType Leaf) {
+            $logText = Get-Content -LiteralPath $runLogPath -Raw
         }
+
+        $combinedError = $logText + [Environment]::NewLine + $message
+
+        if (Test-IsCodexLimitError -Text $combinedError) {
+            $removed = Remove-LimitInterruptedArtifacts -BaselinePath $baselinePath -WithPromptPath $withPromptPath -ComparisonPath $comparisonPath
+
+            if ([string]::IsNullOrWhiteSpace($removed)) {
+                $removed = "aucun artefact incomplet détecté"
+            }
+
+            $stopDetail = "Quota ou rate limit Codex détecté. Reprise au prochain lancement. Nettoyage : $removed."
+
+            Write-Host ""
+            Write-Host "[$id] LIMITE CODEX DÉTECTÉE"
+            Write-Host "La suite s'arrête proprement."
+            Write-Host "Relance .\run-suite.ps1 quand la limite est réinitialisée."
+            Write-Host "Le test sera repris automatiquement."
+            Write-Host "Nettoyage : $removed"
+
+            $results += [pscustomobject]@{
+                Id = $id
+                Case = $case
+                Prompt = $prompt
+                Status = "ARRÊT LIMITE"
+                Detail = $stopDetail
+            }
+
+            $stoppedForLimit = $true
+        }
+        else {
+            Write-Host ""
+            Write-Host "[$id] ÉCHEC : $message"
+
+            $results += [pscustomobject]@{
+                Id = $id
+                Case = $case
+                Prompt = $prompt
+                Status = "ÉCHEC"
+                Detail = $message
+            }
+        }
+    }
+
+    if ($stoppedForLimit) {
+        try {
+            Assert-CleanRepository
+        }
+        catch {
+            $stopDetail = $stopDetail + " Attention : vérifie git status avant la reprise."
+            Write-Host ""
+            Write-Host "Attention : le dépôt n'est pas propre après l'arrêt."
+            Write-Host "Vérifie git status avant de relancer la suite."
+        }
+
+        break
     }
 
     Assert-CleanRepository
@@ -205,6 +356,7 @@ $okCount = @($results | Where-Object { $_.Status -eq "OK" }).Count
 $doneCount = @($results | Where-Object { $_.Status -eq "DÉJÀ TERMINÉ" }).Count
 $skippedCount = @($results | Where-Object { $_.Status -eq "IGNORÉ" }).Count
 $failedCount = @($results | Where-Object { $_.Status -eq "ÉCHEC" }).Count
+$limitStopCount = @($results | Where-Object { $_.Status -eq "ARRÊT LIMITE" }).Count
 
 $lines = @(
     "# Résultats de la suite",
@@ -219,6 +371,21 @@ $lines = @(
     "- Déjà terminés : $doneCount",
     "- Ignorés : $skippedCount",
     "- Échecs : $failedCount",
+    "- Arrêts quota/rate limit : $limitStopCount"
+)
+
+if ($stoppedForLimit) {
+    $lines += @(
+        "",
+        "## Suite interrompue",
+        "",
+        "La suite a été arrêtée proprement après détection d'une limite Codex.",
+        "",
+        "Relance simplement .\run-suite.ps1 après réinitialisation de la limite. Les tests déjà terminés seront sautés et le test interrompu sera repris."
+    )
+}
+
+$lines += @(
     "",
     "## Détail",
     "",
@@ -235,16 +402,28 @@ Write-Utf8NoBom -Path $SummaryPath -Content $summary
 
 Write-Host ""
 Write-Host "============================================================"
-Write-Host "SUITE TERMINÉE"
+
+if ($stoppedForLimit) {
+    Write-Host "SUITE ARRÊTÉE : LIMITE CODEX"
+}
+else {
+    Write-Host "SUITE TERMINÉE"
+}
+
 Write-Host "============================================================"
 Write-Host ""
-Write-Host "OK               : $okCount"
-Write-Host "Déjà terminés    : $doneCount"
-Write-Host "Ignorés          : $skippedCount"
-Write-Host "Échecs           : $failedCount"
-Write-Host "Résumé            : $SummaryPath"
+Write-Host "OK                    : $okCount"
+Write-Host "Déjà terminés         : $doneCount"
+Write-Host "Ignorés               : $skippedCount"
+Write-Host "Échecs                : $failedCount"
+Write-Host "Arrêts limite Codex   : $limitStopCount"
+Write-Host "Résumé                 : $SummaryPath"
 
-if ($failedCount -gt 0) {
+if ($stoppedForLimit) {
+    Write-Host ""
+    Write-Host "Relance simplement .\run-suite.ps1 après le reset de la limite."
+}
+elseif ($failedCount -gt 0) {
     Write-Host ""
     Write-Host "Certains tests ont échoué. Consulte suite-summary.md."
 }

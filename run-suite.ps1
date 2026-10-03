@@ -342,6 +342,38 @@ function Remove-LimitInterruptedArtifacts {
     return $removed
 }
 
+function Get-GeneratedCaseFromLog {
+    param(
+        [string]$LogPath
+    )
+
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+        return $null
+    }
+
+    $logText = Read-Utf8Text -Path $LogPath
+    $matches = [regex]::Matches(
+        $logText,
+        '(?ms)^codex\s*\r?\n(.*?)(?=^tokens used\s*$|\z)'
+    )
+
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+
+    $candidate = $matches[$matches.Count - 1].Groups[1].Value.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        return $null
+    }
+
+    if ($candidate.Length -lt 80) {
+        return $null
+    }
+
+    return $candidate
+}
+
 function Invoke-CaseGeneration {
     param(
         [string]$Id,
@@ -631,11 +663,18 @@ foreach ($test in $tests) {
     Write-Host $promptRelativePath -ForegroundColor Cyan
 
     if (-not (Test-Path -LiteralPath $casePath -PathType Leaf)) {
-        Write-UiStatus -Label "CAS" -Message "Génération..." -Color Yellow
+        $recoveredCase = Get-GeneratedCaseFromLog -LogPath $generationLogPath
 
-        try {
-            Invoke-CaseGeneration -Id $id -PromptRelativePath $promptRelativePath -PromptBlock $test.PromptBlock -CasePath $casePath -GenerationLogPath $generationLogPath
+        if (-not [string]::IsNullOrWhiteSpace($recoveredCase)) {
+            Write-Utf8NoBom -Path $casePath -Content ($recoveredCase + [Environment]::NewLine)
+            Write-UiStatus -Label "CAS" -Message "Récupéré depuis le log précédent" -Color DarkGreen
         }
+        else {
+            Write-UiStatus -Label "CAS" -Message "Génération..." -Color Yellow
+
+            try {
+                Invoke-CaseGeneration -Id $id -PromptRelativePath $promptRelativePath -PromptBlock $test.PromptBlock -CasePath $casePath -GenerationLogPath $generationLogPath
+            }
         catch {
             $message = $_.Exception.Message
             $generationLogText = ""
@@ -690,7 +729,8 @@ foreach ($test in $tests) {
                 Detail = $message
             }
 
-            continue
+                continue
+            }
         }
     }
     else {

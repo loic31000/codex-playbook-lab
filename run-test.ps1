@@ -98,21 +98,13 @@ function Invoke-CodexTestRun {
     Write-Host "============================================================"
     Write-Host ""
 
-    $codexArgs = @(
-        "exec",
-        "--ephemeral",
-        "--color",
-        "never",
-        "--output-last-message",
-        $finalFile,
-        "-"
-    )
+    $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $finalFile + '" - 2>&1'
 
     $previousErrorActionPreference = $ErrorActionPreference
 
     try {
         $ErrorActionPreference = "Continue"
-        Read-Utf8Text -Path $inputFile | & codex @codexArgs
+        Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand
         $codexExitCode = $LASTEXITCODE
     }
     finally {

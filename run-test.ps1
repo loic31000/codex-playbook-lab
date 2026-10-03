@@ -9,7 +9,9 @@
     [Parameter(Mandatory = $true)]
     [string]$PromptPath,
 
-    [switch]$AllowUntrackedCase
+    [switch]$AllowUntrackedCase,
+
+    [switch]$Embedded
 )
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -17,6 +19,7 @@ $OutputEncoding = [Console]::OutputEncoding
 $ErrorActionPreference = "Stop"
 
 $RepoPath = (Get-Location).Path
+$RepoName = Split-Path $RepoPath -Leaf
 $SaveRunScript = Join-Path $RepoPath "save-run.ps1"
 $BackupRoot = Join-Path (Split-Path $RepoPath -Parent) "codex-playbook-test-runs"
 

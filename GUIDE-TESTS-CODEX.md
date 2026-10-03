@@ -1,27 +1,46 @@
-﻿# Guide simple - Tester un prompt avec Codex
+﻿# Guide simple - Tester les prompts avec Codex
 
-Ce dépôt sert à comparer deux exécutions du même cas de test :
+## Objectif
+
+Le système automatise la comparaison entre :
 
 - Codex sans prompt du playbook ;
-- Codex avec un prompt du playbook.
+- Codex avec le prompt du playbook.
 
-Le script `run-test.ps1` automatise entièrement ces deux runs.
+L'usage normal consiste maintenant à lancer toute la suite avec une seule commande.
 
-Tu ne copies jamais le prompt manuellement dans Codex.
+```powershell
+.\run-suite.ps1
+```
 
-Tu indiques simplement le fichier du prompt avec `-PromptPath`.
+Tu ne copies jamais les prompts manuellement dans Codex.
 
 ---
 
-## 1. Avant de commencer
+## 1. Les fichiers importants
+
+```text
+run-test.ps1
+= moteur d'un test
+
+run-suite.ps1
+= lance tous les tests l'un après l'autre
+
+tests-suite.json
+= liste des tests à lancer
+
+tests-cases\
+= scénarios de test
+
+..\codex-playbook-test-runs\
+= résultats générés
+```
+
+---
+
+## 2. Avant de lancer la suite
 
 Ouvre PowerShell dans le dépôt `codex-playbook-tests`.
-
-Si nécessaire :
-
-```powershell
-cd <chemin-vers>\codex-playbook-tests
-```
 
 Récupère les dernières modifications :
 
@@ -29,13 +48,13 @@ Récupère les dernières modifications :
 git pull --ff-only origin main
 ```
 
-Vérifie que le dépôt est propre :
+Vérifie l'état Git :
 
 ```powershell
 git status
 ```
 
-Tu dois avoir :
+Le dépôt doit être propre :
 
 ```text
 nothing to commit, working tree clean
@@ -43,13 +62,45 @@ nothing to commit, working tree clean
 
 ---
 
-## 2. Créer un cas de test
+## 3. Déclarer les tests
 
-Crée un fichier dans :
+Le fichier `tests-suite.json` contient la liste des tests.
 
-```text
-tests-cases/
+Exemple :
+
+```json
+[
+  {
+    "id": "004",
+    "case": "tests-cases/004-code-review.md",
+    "prompt": "../codex-engineering-playbook-fr/11-Review-Convergence/01 - Code review.md",
+    "enabled": true
+  },
+  {
+    "id": "005",
+    "case": "tests-cases/005-debug.md",
+    "prompt": "../codex-engineering-playbook-fr/10-Debug/01 - Debug.md",
+    "enabled": true
+  }
+]
 ```
+
+Chaque entrée contient :
+
+- `id` : identifiant unique ;
+- `case` : chemin du cas de test ;
+- `prompt` : chemin du prompt du playbook ;
+- `enabled` : `true` pour exécuter le test, `false` pour l'ignorer.
+
+Le cas de test et `tests-suite.json` doivent être commités avant le lancement.
+
+Si tu modifies réellement un scénario ou le prompt associé, utilise un nouvel identifiant de test afin de ne pas réutiliser d'anciens résultats.
+
+---
+
+## 4. Ajouter un nouveau cas
+
+Crée le fichier dans `tests-cases`.
 
 Exemple :
 
@@ -57,145 +108,96 @@ Exemple :
 tests-cases/004-code-review.md
 ```
 
-Le fichier contient uniquement le scénario à tester.
+Ajoute ensuite ce test dans `tests-suite.json`.
 
-Exemple :
-
-```markdown
-# Test 004 - Code review
-
-Analyse le code fourni et identifie les problèmes importants.
-
-Contexte :
-- ...
-- ...
-
-Résultat attendu :
-- ...
-```
-
----
-
-## 3. Committer le cas de test
-
-Avant de lancer le test :
+Puis commit :
 
 ```powershell
-git add .
+git add tests-cases tests-suite.json
 git commit -m "test: add scenario 004"
 git push origin main
 ```
 
-Le cas doit être présent dans Git avant l'exécution.
-
 ---
 
-## 4. Indiquer le prompt à tester
+## 5. Lancer toute la suite
 
-Tu ne colles pas le prompt dans Codex.
-
-Le script reçoit simplement le chemin du fichier avec `-PromptPath`.
-
-Exemple :
+Une seule commande :
 
 ```powershell
--PromptPath "..\codex-engineering-playbook-fr\11-Review-Convergence\01 - Code review.md"
+.\run-suite.ps1
 ```
 
-Le script ouvre automatiquement ce fichier et extrait uniquement le contenu placé sous :
+Le script lit `tests-suite.json` puis exécute les tests dans l'ordre.
+
+Pour chaque test :
 
 ```text
-## Prompt prêt à copier
-```
-
-Le reste de la fiche du prompt n'est pas envoyé à Codex.
-
----
-
-## 5. Lancer le test automatique
-
-Commande complète :
-
-```powershell
-.\run-test.ps1 `
-  -Id "004" `
-  -Case "tests-cases/004-code-review.md" `
-  -PromptPath "..\codex-engineering-playbook-fr\11-Review-Convergence\01 - Code review.md"
-```
-
-À adapter :
-
-- `-Id` : numéro du test ;
-- `-Case` : fichier du scénario ;
-- `-PromptPath` : fichier du prompt du playbook.
-
----
-
-## 6. Ce que le script envoie à Codex
-
-### Run baseline
-
-Le script lance Codex avec le cas de test uniquement.
-
-Le prompt du playbook n'est pas utilisé.
-
-```text
-Cas de test
-    ↓
-Codex
-```
-
-### Run avec prompt
-
-Après réinitialisation du dépôt, le script lit automatiquement `-PromptPath`, extrait `Prompt prêt à copier`, puis ajoute exactement le même cas de test.
-
-```text
-Prompt prêt à copier
-+
-même cas de test
-    ↓
-Codex
-```
-
-Tu n'as aucune insertion manuelle à faire entre les deux runs.
-
----
-
-## 7. Ce que le script fait automatiquement
-
-```text
-vérification de Git
-    ↓
+cas de test
+    |
+    v
 baseline sans prompt
-    ↓
-sauvegarde du run
-    ↓
+    |
+    v
+sauvegarde
+    |
+    v
 reset du dépôt
-    ↓
-lecture automatique de PromptPath
-    ↓
-run avec le prompt
-    ↓
-sauvegarde du run
-    ↓
+    |
+    v
+lecture du fichier prompt
+    |
+    v
+extraction de "Prompt prêt à copier"
+    |
+    v
+même cas + prompt
+    |
+    v
+run avec prompt
+    |
+    v
+sauvegarde
+    |
+    v
 reset du dépôt
-    ↓
-génération du diff de comparaison
+    |
+    v
+comparison.diff
 ```
 
-Tu n'as plus besoin de lancer manuellement les deux runs ni `save-run.ps1`.
+Puis le script passe automatiquement au test suivant.
 
 ---
 
-## 8. Où trouver les résultats
+## 6. Reprendre une suite interrompue
 
-Les résultats sont enregistrés dans un dossier frère du dépôt :
+Relance simplement :
+
+```powershell
+.\run-suite.ps1
+```
+
+Comportement :
+
+- un test entièrement terminé est sauté ;
+- si seul le baseline existe, le test reprend avec le prompt ;
+- si les deux runs existent mais pas la comparaison, seule la comparaison est générée ;
+- un test en erreur n'empêche pas les tests suivants de démarrer, sauf si le dépôt n'est plus propre.
+
+Les résultats existants ne sont pas écrasés.
+
+---
+
+## 7. Où trouver les résultats
+
+Les résultats sont placés dans le dossier frère :
 
 ```text
 ..\codex-playbook-test-runs\
 ```
 
-Pour le test `004` :
+Exemple pour le test `004` :
 
 ```text
 004-baseline\
@@ -203,11 +205,12 @@ Pour le test `004` :
 004-comparison.diff
 ```
 
-Chaque dossier contient notamment :
+Chaque run contient notamment :
 
 ```text
 codex-final.txt
 codex-input.txt
+codex-exit-code.txt
 diff.patch
 files-list.txt
 tests.txt
@@ -217,53 +220,49 @@ summary.txt
 files\
 ```
 
-Le fichier :
+À la fin de la suite, un résumé global est créé :
 
 ```text
-004-comparison.diff
+..\codex-playbook-test-runs\suite-summary.md
 ```
 
-contient les différences entre les fichiers produits par le baseline et ceux produits avec le prompt.
+Il contient le statut de chaque test :
+
+```text
+OK
+DÉJÀ TERMINÉ
+IGNORÉ
+ÉCHEC
+```
 
 ---
 
-## 9. Noter le résultat dans la fiche du prompt
+## 8. Lancer un seul test
 
-Après comparaison manuelle, garde seulement un résumé court dans la fiche du prompt.
+Pour tester uniquement un scénario :
 
-Exemple :
-
-```markdown
-### Test 004 - Code review
-
-**Baseline :** réussi
-**Avec prompt :** réussi
-
-**Gains observés :**
-- meilleure priorisation ;
-- moins de faux positifs.
-
-**Point à surveiller :**
-- ...
-
-**Conclusion :** positif, à confirmer.
-
-**Décision :** conserver le prompt sans modification.
+```powershell
+.\run-test.ps1 `
+  -Id "004" `
+  -Case "tests-cases/004-code-review.md" `
+  -PromptPath "..\codex-engineering-playbook-fr\11-Review-Convergence\01 - Code review.md"
 ```
 
-Les preuves détaillées restent dans `codex-playbook-test-runs`.
+`run-suite.ps1` utilise ce même moteur automatiquement.
 
 ---
 
-## Routine à retenir
+## 9. Routine normale
 
 ```text
-1. Créer un cas de test
-2. Commit + push
-3. Indiquer le fichier du prompt avec -PromptPath
-4. Lancer run-test.ps1
-5. Examiner baseline, with-prompt et comparison.diff
-6. Noter le verdict dans la fiche du prompt
+1. Créer les cas utiles
+2. Les ajouter à tests-suite.json
+3. Commit + push
+4. Lancer .\run-suite.ps1
+5. Laisser la suite tourner
+6. Ouvrir suite-summary.md
+7. Examiner seulement les résultats intéressants
+8. Noter le verdict dans la fiche du prompt
 ```
 
 C'est tout.

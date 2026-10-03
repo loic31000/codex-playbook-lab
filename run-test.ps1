@@ -89,14 +89,12 @@ function Invoke-CodexTestRun {
     $inputFile = Join-Path $tempRoot "input.txt"
     $finalFile = Join-Path $tempRoot "codex-final.txt"
     $exitFile = Join-Path $tempRoot "codex-exit-code.txt"
+    $logFile = Join-Path $tempRoot "codex-log.txt"
 
     Write-Utf8NoBom -Path $inputFile -Content $InputText
 
-    Write-Host ""
-    Write-Host "============================================================"
-    Write-Host "RUN : $RunName"
-    Write-Host "============================================================"
-    Write-Host ""
+    $runLabel = if ($RunName -like "*-baseline") { "BASELINE" } else { "AVEC PROMPT" }
+    Write-Host ("  [{0}] Exécution Codex..." -f $runLabel)
 
     $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $finalFile + '" - 2>&1'
 
@@ -104,13 +102,14 @@ function Invoke-CodexTestRun {
 
     try {
         $ErrorActionPreference = "Continue"
-        Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand
+        $codexOutput = Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand | Out-String
         $codexExitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
 
+    Write-Utf8NoBom -Path $logFile -Content $codexOutput
     Write-Utf8NoBom -Path $exitFile -Content ([string]$codexExitCode)
 
     & $SaveRunScript -Name $RunName
@@ -119,6 +118,7 @@ function Invoke-CodexTestRun {
 
     Copy-Item -LiteralPath $inputFile -Destination (Join-Path $runPath "codex-input.txt") -Force
     Copy-Item -LiteralPath $exitFile -Destination (Join-Path $runPath "codex-exit-code.txt") -Force
+    Copy-Item -LiteralPath $logFile -Destination (Join-Path $runPath "codex-log.txt") -Force
 
     if (Test-Path -LiteralPath $finalFile) {
         Copy-Item -LiteralPath $finalFile -Destination (Join-Path $runPath "codex-final.txt") -Force
@@ -130,8 +130,10 @@ function Invoke-CodexTestRun {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force
 
     if ($codexExitCode -ne 0) {
-        throw "Codex a terminé avec le code $codexExitCode pendant '$RunName'. Le run a quand même été sauvegardé."
+        throw "Codex a terminé avec le code $codexExitCode pendant '$RunName' (voir codex-log.txt)."
     }
+
+    Write-Host ("    [OK] {0}" -f $runLabel)
 }
 
 function Get-SavedRunExitCode {
@@ -180,7 +182,7 @@ function Remove-InvalidSavedRun {
 
 function New-Comparison {
     Write-Host ""
-    Write-Host "==> Génération du diff de comparaison"
+    Write-Host "  [COMPARAISON] Génération..."
 
     $baselineFiles = Join-Path $BaselineRunPath "files"
     $withPromptFiles = Join-Path $WithPromptRunPath "files"
@@ -201,6 +203,7 @@ function New-Comparison {
     }
 
     Write-Utf8NoBom -Path $ComparisonPath -Content $comparison
+    Write-Host "    [OK] Comparaison"
 }
 
 if (-not (Test-Path ".git")) {
@@ -262,6 +265,8 @@ $baselineInput = @"
 Exécute la demande décrite dans le cas de test ci-dessous.
 Utilise le repository comme contexte et modifie le code uniquement si le cas le demande.
 Sous Windows PowerShell 5.1, si tu lis un fichier texte, lis-le explicitement en UTF-8 afin de préserver les accents.
+N’exécute des tests, builds ou outils de validation que s’ils sont pertinents pour la tâche.
+Si une commande échoue uniquement avec EPERM, Access denied ou une restriction du sandbox, traite cela comme une limitation d’environnement et non comme un défaut du repository.
 
 $caseContent
 "@
@@ -270,6 +275,8 @@ $withPromptInput = @"
 $promptBlock
 
 Contrainte d'environnement : sous Windows PowerShell 5.1, si tu lis un fichier texte, lis-le explicitement en UTF-8 afin de préserver les accents.
+N’exécute des tests, builds ou outils de validation que s’ils sont pertinents pour la tâche.
+Si une commande échoue uniquement avec EPERM, Access denied ou une restriction du sandbox, traite cela comme une limitation d’environnement et non comme un défaut du repository.
 
 Cas de test à traiter :
 
@@ -300,13 +307,4 @@ if (-not $comparisonExists) {
     New-Comparison
 }
 
-Write-Host ""
-Write-Host "============================================================"
-Write-Host "TEST $Id TERMINÉ"
-Write-Host "============================================================"
-Write-Host ""
-Write-Host "Baseline    : $BaselineRunPath"
-Write-Host "Avec prompt : $WithPromptRunPath"
-Write-Host "Comparaison : $ComparisonPath"
-Write-Host ""
-Write-Host "Le dépôt est revenu à son état initial."
+Write-Host ("  [OK] Test {0} terminé" -f $Id)

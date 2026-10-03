@@ -132,6 +132,31 @@ function Invoke-CodexTestRun {
     }
 }
 
+function New-Comparison {
+    Write-Host ""
+    Write-Host "==> Génération du diff de comparaison"
+
+    $baselineFiles = Join-Path $BaselineRunPath "files"
+    $withPromptFiles = Join-Path $WithPromptRunPath "files"
+
+    $previousErrorActionPreference = $ErrorActionPreference
+
+    try {
+        $ErrorActionPreference = "Continue"
+        $comparison = git diff --no-index --text $baselineFiles $withPromptFiles 2>&1 | Out-String
+        $comparisonExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if (($comparisonExitCode -ne 0) -and ($comparisonExitCode -ne 1)) {
+        throw "Impossible de générer le diff de comparaison (code $comparisonExitCode)."
+    }
+
+    Write-Utf8NoBom -Path $ComparisonPath -Content $comparison
+}
+
 if (-not (Test-Path ".git")) {
     throw "Lance ce script depuis la racine de codex-playbook-tests."
 }
@@ -159,15 +184,25 @@ if (-not (Test-Path -LiteralPath $PromptPath -PathType Leaf)) {
     throw "Prompt introuvable : $PromptPath"
 }
 
-if (Test-Path -LiteralPath $BaselineRunPath) {
-    throw "Le run existe déjà : $BaselineRunPath"
-}
-
-if (Test-Path -LiteralPath $WithPromptRunPath) {
-    throw "Le run existe déjà : $WithPromptRunPath"
-}
-
 Assert-CleanRepository
+
+$baselineExists = Test-Path -LiteralPath $BaselineRunPath
+$withPromptExists = Test-Path -LiteralPath $WithPromptRunPath
+$comparisonExists = Test-Path -LiteralPath $ComparisonPath
+
+if ($withPromptExists -and -not $baselineExists) {
+    throw "État incohérent : le run avec prompt existe sans baseline pour le test $Id."
+}
+
+if ($comparisonExists -and (-not $baselineExists -or -not $withPromptExists)) {
+    throw "État incohérent : la comparaison existe sans les deux runs pour le test $Id."
+}
+
+if ($baselineExists -and $withPromptExists -and $comparisonExists) {
+    Write-Host ""
+    Write-Host "TEST $Id déjà terminé. Aucun run relancé."
+    return
+}
 
 $promptBlock = Get-PromptBlock -Path $PromptPath
 $caseContent = Get-Content -LiteralPath $Case -Raw
@@ -187,36 +222,29 @@ Cas de test à traiter :
 $caseContent
 "@
 
-Invoke-CodexTestRun -RunName $BaselineName -InputText $baselineInput
+if (-not $baselineExists) {
+    Invoke-CodexTestRun -RunName $BaselineName -InputText $baselineInput
+}
+else {
+    Write-Host ""
+    Write-Host "Baseline déjà présent pour $Id. Reprise au run avec prompt."
+}
 
 Assert-CleanRepository
 
-Invoke-CodexTestRun -RunName $WithPromptName -InputText $withPromptInput
+if (-not $withPromptExists) {
+    Invoke-CodexTestRun -RunName $WithPromptName -InputText $withPromptInput
+}
+else {
+    Write-Host ""
+    Write-Host "Run avec prompt déjà présent pour $Id. Reprise à la comparaison."
+}
 
 Assert-CleanRepository
 
-Write-Host ""
-Write-Host "==> Génération du diff de comparaison"
-
-$baselineFiles = Join-Path $BaselineRunPath "files"
-$withPromptFiles = Join-Path $WithPromptRunPath "files"
-
-$previousErrorActionPreference = $ErrorActionPreference
-
-try {
-    $ErrorActionPreference = "Continue"
-    $comparison = git diff --no-index --text $baselineFiles $withPromptFiles 2>&1 | Out-String
-    $comparisonExitCode = $LASTEXITCODE
+if (-not $comparisonExists) {
+    New-Comparison
 }
-finally {
-    $ErrorActionPreference = $previousErrorActionPreference
-}
-
-if (($comparisonExitCode -ne 0) -and ($comparisonExitCode -ne 1)) {
-    throw "Impossible de générer le diff de comparaison (code $comparisonExitCode)."
-}
-
-Write-Utf8NoBom -Path $ComparisonPath -Content $comparison
 
 Write-Host ""
 Write-Host "============================================================"
@@ -228,6 +256,3 @@ Write-Host "Avec prompt : $WithPromptRunPath"
 Write-Host "Comparaison : $ComparisonPath"
 Write-Host ""
 Write-Host "Le dépôt est revenu à son état initial."
-Write-Host "Envoie-moi ensuite :"
-Write-Host "  - $ComparisonPath"
-Write-Host "  - les deux fichiers codex-final.txt"

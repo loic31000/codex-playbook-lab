@@ -61,21 +61,28 @@ Le fichier `tests-suite.json` contient seulement :
 
 Tu n'as normalement rien à modifier.
 
-## Où sont les cas générés
-
-Ils sont créés automatiquement hors du repo Git :
-
-```text
-..\codex-playbook-test-runs\generated-cases\
-```
-
-Ils ne polluent donc pas le repository de test.
-
 ## Où sont les résultats
+
+Ils restent hors du repo Git :
 
 ```text
 ..\codex-playbook-test-runs\
 ```
+
+Chaque prompt possède maintenant un dossier court et lisible :
+
+```text
+01-04-inconnues-hypotheses\
+  result.md
+  case.md
+  diff.patch
+  generation.log
+  fingerprint.txt
+  base\
+  prompt\
+```
+
+Le dossier contient donc tout ce qui concerne un prompt au même endroit.
 
 À la fin, commence par ouvrir :
 
@@ -83,10 +90,10 @@ Ils ne polluent donc pas le repository de test.
 suite-summary.md
 ```
 
-Pour chaque test, le fichier le plus pratique à analyser est :
+Puis ouvre le dossier du prompt qui t'intéresse et son fichier :
 
 ```text
-auto-xxxxxxxxxxxx-result.md
+result.md
 ```
 
 Il contient au même endroit :
@@ -100,6 +107,8 @@ sortie avec prompt
 +
 diff des fichiers
 ```
+
+Les anciens fichiers et dossiers `auto-...` sont renommés et regroupés automatiquement au prochain lancement.
 
 ## Si tu arrêtes le script
 

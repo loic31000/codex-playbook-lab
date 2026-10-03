@@ -50,11 +50,29 @@ git status
 
 Le dépôt doit être propre avant le lancement.
 
-La suite continue d'un test à l'autre même si un test échoue.
+La suite continue d'un test à l'autre pour les erreurs normales.
 
 Les tests déjà terminés sont ignorés lors d'une nouvelle exécution.
 
 Si un test a été interrompu après le baseline, `run-test.ps1` reprend au run avec prompt.
+
+### Quota et rate limit Codex
+
+Si Codex renvoie une erreur de quota ou de rate limit, `run-suite.ps1` :
+
+1. détecte la limite ;
+2. arrête proprement la suite ;
+3. retire uniquement le run incomplet provoqué par la limite ;
+4. conserve tous les runs déjà valides ;
+5. inscrit `ARRÊT LIMITE` dans `suite-summary.md`.
+
+Après réinitialisation de la limite, relance simplement :
+
+```powershell
+.\run-suite.ps1
+```
+
+Les tests terminés sont sautés et le test interrompu reprend automatiquement.
 
 ## Configurer les tests
 
@@ -98,13 +116,15 @@ Pour un test `004` :
 004-comparison.diff
 ```
 
-Après la suite complète :
+Après la suite complète ou un arrêt propre :
 
 ```text
 suite-summary.md
 ```
 
-Ce fichier résume les tests terminés, ignorés et échoués.
+Ce fichier résume les tests terminés, ignorés, échoués et les arrêts liés aux limites Codex.
+
+Un fichier local `XXX-suite.log` conserve aussi la sortie du test utilisée pour diagnostiquer une erreur de limite.
 
 ## Lancer un seul test
 

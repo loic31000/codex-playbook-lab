@@ -296,6 +296,8 @@ function New-Comparison {
     Write-Host "    ✓ Comparaison créée" -ForegroundColor Green
 }
 
+Write-AppHeader -ScriptName "run-test.ps1 • Exécution d’un test"
+
 if (-not (Test-Path ".git")) {
     throw "Lance ce script depuis la racine de codex-playbook-tests."
 }

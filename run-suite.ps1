@@ -281,6 +281,7 @@ Règles :
 - ne mentionne pas qu'il s'agit d'un baseline ou d'un test A/B ;
 - n'inclus pas le texte du prompt dans le cas ;
 - utilise le repository courant quand le prompt concerne du code ;
+- sous Windows PowerShell 5.1, lis les fichiers texte explicitement en UTF-8 afin de préserver les accents ;
 - si le prompt porte sur une review, un diagnostic, des logs, une architecture, une spécification ou de la documentation, fournis dans le cas tout le matériau concret nécessaire ;
 - introduis une ambiguïté seulement si elle est pertinente pour ce prompt ;
 - évite les dépendances externes et les services réseau ;

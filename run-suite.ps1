@@ -399,33 +399,33 @@ Retourne uniquement le Markdown du cas de test.
         -ActivityLabel "Génération du cas — Codex travaille toujours..."
 
     $exitCode = $generationRun.ExitCode
+    $generated = ""
 
-    if ($exitCode -ne 0) {
-        $logText = ""
+    if (Test-Path -LiteralPath $finalFile -PathType Leaf) {
+        $generated = (Read-Utf8Text -Path $finalFile).Trim()
+    }
 
-        if (Test-Path -LiteralPath $GenerationLogPath -PathType Leaf) {
-            $logText = Read-Utf8Text -Path $GenerationLogPath
+    if (-not [string]::IsNullOrWhiteSpace($generated)) {
+        Write-Utf8NoBom -Path $CasePath -Content ($generated + [Environment]::NewLine)
+
+        if ($exitCode -eq 0) {
+            Write-Host ("    ✓ Cas généré en {0}" -f (Format-Elapsed $generationRun.Elapsed)) -ForegroundColor Green
+        }
+        else {
+            Write-Host ("    ✓ Cas généré en {0} • warning Codex code {1} ignoré" -f (Format-Elapsed $generationRun.Elapsed), $exitCode) -ForegroundColor Yellow
         }
 
         Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        throw "CASE_GENERATION_FAILED [$Id] code=$exitCode (voir le log de génération)."
+        return
     }
 
-    if (-not (Test-Path -LiteralPath $finalFile -PathType Leaf)) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        throw "CASE_GENERATION_FAILED [$Id] aucun cas généré."
-    }
-
-    $generated = (Read-Utf8Text -Path $finalFile).Trim()
-
-    if ([string]::IsNullOrWhiteSpace($generated)) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        throw "CASE_GENERATION_FAILED [$Id] cas vide."
-    }
-
-    Write-Utf8NoBom -Path $CasePath -Content ($generated + [Environment]::NewLine)
     Remove-Item -LiteralPath $tempRoot -Recurse -Force
-    Write-Host ("    ✓ Cas généré en {0}" -f (Format-Elapsed $generationRun.Elapsed)) -ForegroundColor Green
+
+    if ($exitCode -ne 0) {
+        throw "CASE_GENERATION_FAILED [$Id] code=$exitCode sans fichier final exploitable (voir le log de génération)."
+    }
+
+    throw "CASE_GENERATION_FAILED [$Id] aucun cas exploitable généré."
 }
 
 function Write-ResultPackage {

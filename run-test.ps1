@@ -35,6 +35,15 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Content, $encoding)
 }
 
+function Read-Utf8Text {
+    param(
+        [string]$Path
+    )
+
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    return [System.IO.File]::ReadAllText($Path, $encoding)
+}
+
 function Assert-CleanRepository {
     $status = git status --porcelain | Out-String
 
@@ -55,7 +64,7 @@ function Get-PromptBlock {
         [string]$Path
     )
 
-    $content = Get-Content -LiteralPath $Path -Raw
+    $content = Read-Utf8Text -Path $Path
     $pattern = '(?s)##\s+Prompt prêt à copier\s*\x60\x60\x60(?:text)?\s*(.*?)\s*\x60\x60\x60'
     $match = [regex]::Match($content, $pattern)
 
@@ -102,7 +111,7 @@ function Invoke-CodexTestRun {
 
     try {
         $ErrorActionPreference = "Continue"
-        Get-Content -LiteralPath $inputFile -Raw | & codex @codexArgs
+        Read-Utf8Text -Path $inputFile | & codex @codexArgs
         $codexExitCode = $LASTEXITCODE
     }
     finally {
@@ -205,7 +214,7 @@ if ($baselineExists -and $withPromptExists -and $comparisonExists) {
 }
 
 $promptBlock = Get-PromptBlock -Path $PromptPath
-$caseContent = Get-Content -LiteralPath $Case -Raw
+$caseContent = Read-Utf8Text -Path $Case
 
 $baselineInput = @"
 Exécute la demande décrite dans le cas de test ci-dessous.

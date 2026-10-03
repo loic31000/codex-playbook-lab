@@ -293,21 +293,13 @@ Retourne uniquement le Markdown du cas de test.
 
     Write-Utf8NoBom -Path $inputFile -Content $generatorInput
 
-    $codexArgs = @(
-        "exec",
-        "--ephemeral",
-        "--color",
-        "never",
-        "--output-last-message",
-        $finalFile,
-        "-"
-    )
+    $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $finalFile + '" - 2>&1'
 
     $previousErrorActionPreference = $ErrorActionPreference
 
     try {
         $ErrorActionPreference = "Continue"
-        Read-Utf8Text -Path $inputFile | & codex @codexArgs 2>&1 | Tee-Object -FilePath $GenerationLogPath
+        Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand | Tee-Object -FilePath $GenerationLogPath
         $exitCode = $LASTEXITCODE
     }
     finally {

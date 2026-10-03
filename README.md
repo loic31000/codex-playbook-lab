@@ -1,132 +1,130 @@
-# Codex Playbook Tests
+# Codex Playbook Lab
 
-Banc de test automatique pour les prompts du Codex Engineering Playbook.
+Codex Playbook Lab compare, prompt par prompt, le comportement de Codex sans consigne spécialisée (baseline) puis avec les prompts du playbook français. Le moteur est commun à Windows, Linux/macOS et Docker : toute la logique métier vit dans `src/`, en Node.js standard.
 
-## Utilisation normale
+## Architecture
 
-Depuis la racine de ce dépôt :
+- `src/cli.mjs` : commandes et menu communs ;
+- `src/core/` : découverte, exécution Codex, reprise, résultats et validations ;
+- `src/platform/` : arrêt ciblé des arbres de processus Windows/POSIX ;
+- `bin/` : façades PowerShell 5.1 et Bash très fines ;
+- `docker/` et `compose.yaml` : même moteur dans un conteneur ;
+- scripts `.ps1` à la racine : compatibilité temporaire avec l’ancien usage.
+
+Les résultats restent hors du dépôt, par défaut dans le sibling `../codex-playbook-test-runs`. Le playbook attendu par défaut est `../codex-engineering-playbook-fr`.
+
+## Prérequis
+
+- Node.js 20 ou plus récent ;
+- npm ;
+- Git ;
+- Codex CLI installé et authentifié ;
+- le dépôt du playbook placé à côté de celui-ci, sauf surcharge de configuration.
+
+Le moteur n’ajoute aucune dépendance npm. Les dépendances déjà présentes servent uniquement à l’application TypeScript testée par le banc.
+
+## Démarrage
+
+Windows PowerShell 5.1 :
 
 ```powershell
-git pull --ff-only origin main
-git status
-.\run-suite.ps1
+.\bin\codex-lab.ps1
+.\bin\codex-lab.ps1 check
 ```
 
-C'est tout.
+Linux/macOS :
 
-Tu n'as plus à écrire les cas de test un par un.
+```bash
+chmod +x bin/*.sh docker/entrypoint.sh
+./bin/codex-lab.sh
+./bin/codex-lab.sh check
+```
 
-## Ce que fait run-suite.ps1
+Le menu commun propose la suite complète, un prompt, la reprise, le diagnostic, la lecture et le nettoyage des résultats.
 
-Le script :
-
-1. trouve automatiquement le playbook ;
-2. scanne tous les fichiers Markdown ;
-3. garde les fichiers `format: prompt` contenant `## Prompt prêt à copier` ;
-4. génère automatiquement un cas fictif adapté à chaque prompt ;
-5. lance Codex sans le prompt ;
-6. remet le dépôt dans son état initial ;
-7. lance Codex avec le même cas et le prompt ;
-8. génère la comparaison ;
-9. passe au prompt suivant ;
-10. écrit un résumé global.
-
-Schéma :
+## Commandes non interactives
 
 ```text
-playbook
-   |
-   v
-détection des prompts
-   |
-   v
-génération automatique du cas
-   |
-   +--> baseline sans prompt
-   |
-   +--> même cas avec prompt
-   |
-   v
-comparaison
-   |
-   v
-prompt suivant
-   |
-   v
-suite-summary.md
+codex-lab check [--docker]
+codex-lab list
+codex-lab test <id-ou-chemin>
+codex-lab test <id> --select-only
+codex-lab suite [--prompt <id-ou-chemin>]
+codex-lab resume
+codex-lab results
+codex-lab clean --yes
 ```
+
+Exemples :
+
+```powershell
+.\bin\codex-lab.ps1 test 09-01-implementer-story
+.\bin\run-suite.ps1 --prompt 09-01-implementer-story
+```
+
+Une sélection ambiguë est refusée. `test` sans argument affiche la liste humaine et ne demande jamais un hash.
 
 ## Configuration
 
-`tests-suite.json` ne contient plus la liste des tests.
+`tests-suite.json` accepte `playbook_path` et `cases_per_prompt`. Ces variables surchargent les chemins sans être obligatoires :
 
-Il contient seulement la configuration :
+- `CODEX_LAB_PLAYBOOK_DIR`
+- `CODEX_LAB_RESULTS_DIR`
 
-```json
-{
-  "playbook_path": "../codex-engineering-playbook-fr",
-  "cases_per_prompt": 1
-}
-```
+Les chemins relatifs sont résolus depuis la racine du dépôt de test.
 
-`cases_per_prompt: 1` signifie qu'un cas fictif est généré pour chaque prompt.
+## Flux et résultats
 
-## Reprise automatique
+Chaque test suit strictement : CAS → BASELINE → VALIDATION → AVEC PROMPT → VALIDATION → COMPARAISON. Un run valide est réutilisé lors d’une reprise. Les anciens dossiers `auto-*` sont migrés sans écrasement ; un fingerprint différent archive l’ancien dossier sous `_archive/`.
 
-Les résultats ont un identifiant calculé à partir du chemin et du contenu du prompt.
+Chaque dossier lisible contient notamment `fingerprint.txt`, `case.md`, `generation.log`, `result.md`, `diff.patch`, `base/` et `prompt/`. Les sous-dossiers de run conservent l’entrée, la sortie finale, stdout, stderr, le log combiné, le statut structuré, le diff, les fichiers modifiés et les sorties de validation.
 
-Donc :
+Un run moderne n’est réutilisable que si Codex a réussi, si `git diff --check` passe et si les tests et TypeScript sont soit réussis, soit explicitement classés comme limitation d’environnement. `case.md`, les deux runs valides, `diff.patch` et `result.md` sont tous requis pour considérer un test terminé. Les anciens runs PowerShell dépourvus de `codex-status.json` et `summary.json` conservent un fallback documenté ; un run Node incomplet ne bénéficie pas de cette tolérance.
 
-- un test déjà terminé est sauté ;
-- un test interrompu reprend à l'étape manquante ;
-- si le texte du prompt change, un nouvel identifiant est créé et le prompt est retesté ;
-- les anciens résultats restent disponibles.
-
-Si Codex atteint une limite de quota ou de rate limit, la suite s'arrête proprement.
-
-Après réinitialisation de la limite :
-
-```powershell
-.\run-suite.ps1
-```
-
-La suite reprend automatiquement.
-
-## Résultats
-
-Les résultats restent hors du dépôt Git :
+Après chaque run, le moteur exécute :
 
 ```text
-..\codex-playbook-test-runs\
+npm test -- --run
+npx tsc --noEmit
+git --no-pager diff --check
+git --no-pager reset --hard HEAD
+git --no-pager clean -fd
 ```
 
-Les résultats sont regroupés dans un dossier lisible par prompt :
+## Sécurité Git
 
-```text
-suite-summary.md
-generated-manifest.json
+Un run réel est refusé si le dépôt contient une modification ou un fichier non suivi. Cela protège à la fois le travail utilisateur et le moteur contre `reset --hard` / `clean -fd`. Il faut donc faire revoir puis versionner l’infrastructure avant son premier run réel. `check` se contente d’un warning et n’appelle aucun modèle.
 
-01-04-inconnues-hypotheses\
-  result.md
-  case.md
-  diff.patch
-  generation.log
-  fingerprint.txt
-  base\
-  prompt\
+`clean` ne cible que le dossier de résultats configuré. En interactif il exige le mot `SUPPRIMER`; en non interactif il exige `--yes`.
+
+## Docker
+
+```bash
+docker compose run --rm codex-lab check
+docker compose run --rm codex-lab test 09-01-implementer-story
 ```
 
-Le nom du dossier reprend la section, le numéro du prompt et un titre court. Le hash technique reste uniquement dans les métadonnées internes.
+Compose monte le dépôt Git, le playbook en lecture seule et les résultats persistants. La version de Codex CLI est fixée à `0.160.0` via `CODEX_VERSION`, un argument de build facile à modifier.
 
-`result.md` rassemble pour un test :
+Pour une exécution automatisée, fournissez la clé uniquement au runtime :
 
-- le cas généré ;
-- la sortie baseline ;
-- la sortie avec prompt ;
-- le diff des fichiers produits.
+```bash
+export OPENAI_API_KEY='...'
+docker compose run --rm codex-lab check
+```
 
-Les anciens résultats nommés `auto-...` sont migrés automatiquement vers cette structure lors du prochain lancement.
+L’entrypoint transmet la clé à la commande officielle `codex login --with-api-key`; elle n’est jamais copiée dans l’image ni dans le dépôt. Pour un login ChatGPT existant, créez un override Compose privé qui monte votre `CODEX_HOME` dans le conteneur, sans jamais committer `auth.json`. `check` n’effectue aucun appel de modèle et ne nécessite pas d’authentification.
 
-Les anciens cas manuels dans `tests-cases\` peuvent rester comme historique, mais ils ne sont plus nécessaires au fonctionnement automatique.
+## Compatibilité
 
-Guide détaillé : [GUIDE-TESTS-CODEX.md](GUIDE-TESTS-CODEX.md)
+`codex-lab.ps1`, `run-suite.ps1`, `run-test.ps1` et `save-run.ps1` restent à la racine comme redirections fines. Les nouvelles commandes recommandées sont celles de `bin/`.
+
+Sous Windows, le moteur résout d’abord un exécutable Codex natif. À défaut, il exécute précisément le shim `codex.cmd` via `cmd.exe`, avec des arguments cités, sans activer `shell: true` globalement.
+
+## Tests du moteur
+
+```bash
+npm run test:lab
+```
+
+Ces tests utilisent des fixtures et des processus factices ; ils ne consomment aucun quota Codex.

@@ -1,0 +1,22 @@
+services:
+  codex-lab:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        CODEX_VERSION: "0.160.0"
+    environment:
+      CODEX_LAB_REPO_DIR: /workspace/test-repo
+      CODEX_LAB_PLAYBOOK_DIR: /workspace/playbook
+      CODEX_LAB_RESULTS_DIR: /workspace/results
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/workspace/test-repo
+      - ${CODEX_LAB_PLAYBOOK_DIR:-../codex-engineering-playbook-fr}:/workspace/playbook:ro
+      - ${CODEX_LAB_RESULTS_DIR:-../codex-playbook-test-runs}:/workspace/results
+      - codex_lab_node_modules:/workspace/test-repo/node_modules
+
+volumes:
+  codex_lab_node_modules:

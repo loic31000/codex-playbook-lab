@@ -1,155 +1,96 @@
-# Guide simple - Suite automatique Codex
+# Guide d’exploitation de Codex Playbook Lab
 
-## Ce que tu fais
+## 1. Vérifier avant de lancer
 
-Une fois les deux dépôts placés côte à côte :
-
-```text
-codex-playbook-tests\
-codex-engineering-playbook-fr\
-```
-
-ouvre PowerShell dans `codex-playbook-tests`.
-
-Puis :
+Depuis la racine du dépôt :
 
 ```powershell
-git pull --ff-only origin main
-git status
-.\run-suite.ps1
+git pull --ff-only
+.\bin\codex-lab.ps1 check
 ```
 
-Tu ne crées plus les cas de test à la main.
+Sous Linux :
 
-Tu ne copies plus les prompts dans Codex.
-
-Tu ne lances plus baseline et avec-prompt séparément.
-
-## Ce que le script fait tout seul
-
-```text
-1. Scanne le playbook
-2. Détecte tous les fichiers format: prompt
-3. Extrait "Prompt prêt à copier"
-4. Génère un cas fictif adapté
-5. Lance le baseline
-6. Reset le dépôt
-7. Lance le même cas avec le prompt
-8. Reset le dépôt
-9. Génère la comparaison
-10. Crée un fichier résultat
-11. Passe au prompt suivant
-12. Crée le résumé global
+```bash
+./bin/codex-lab.sh check
 ```
 
-Le générateur de cas reçoit le prompt uniquement pour fabriquer un scénario pertinent.
+Le diagnostic contrôle Git, Node, npm, Codex CLI, la configuration, l’accès aux résultats et le nombre de prompts. Un dépôt modifié produit un warning au diagnostic mais bloque volontairement tout run réel, car chaque run se termine par une restauration Git destructive des seules modifications produites par Codex.
 
-Le baseline reçoit ensuite uniquement le cas généré.
+## 2. Tester un prompt
 
-Le second run reçoit exactement le même cas plus le prompt à évaluer.
-
-## Configuration
-
-Le fichier `tests-suite.json` contient seulement :
-
-```json
-{
-  "playbook_path": "../codex-engineering-playbook-fr",
-  "cases_per_prompt": 1
-}
-```
-
-Tu n'as normalement rien à modifier.
-
-## Où sont les résultats
-
-Ils restent hors du repo Git :
-
-```text
-..\codex-playbook-test-runs\
-```
-
-Chaque prompt possède maintenant un dossier court et lisible :
-
-```text
-01-04-inconnues-hypotheses\
-  result.md
-  case.md
-  diff.patch
-  generation.log
-  fingerprint.txt
-  base\
-  prompt\
-```
-
-Le dossier contient donc tout ce qui concerne un prompt au même endroit.
-
-À la fin, commence par ouvrir :
-
-```text
-suite-summary.md
-```
-
-Puis ouvre le dossier du prompt qui t'intéresse et son fichier :
-
-```text
-result.md
-```
-
-Il contient au même endroit :
-
-```text
-cas généré
-+
-sortie baseline
-+
-sortie avec prompt
-+
-diff des fichiers
-```
-
-Les anciens fichiers et dossiers `auto-...` sont renommés et regroupés automatiquement au prochain lancement.
-
-## Si tu arrêtes le script
-
-Relance simplement :
+Mode guidé :
 
 ```powershell
-.\run-suite.ps1
+.\bin\codex-lab.ps1 test
 ```
 
-Les tests déjà complets sont sautés.
-
-Les tests partiels reprennent à l'étape manquante.
-
-## Si le quota Codex est atteint
-
-Le script arrête la suite proprement.
-
-Il conserve les étapes déjà valides et retire seulement le run incomplet.
-
-Quand la limite est réinitialisée :
+Mode direct avec un ID affiché par `list` :
 
 ```powershell
-.\run-suite.ps1
+.\bin\codex-lab.ps1 list
+.\bin\codex-lab.ps1 test 09-01-implementer-story
 ```
 
-La suite reprend automatiquement.
+On peut aussi fournir le chemin relatif du Markdown. Un simple préfixe ambigu est refusé.
 
-## Si un prompt change
+## 3. Suite et reprise
 
-L'identifiant du test dépend du contenu du prompt.
-
-Donc un prompt modifié obtient automatiquement un nouveau test.
-
-Les anciens résultats ne sont pas écrasés.
-
-## Routine à retenir
-
-```text
-git pull --ff-only origin main
-git status
-.\run-suite.ps1
+```powershell
+.\bin\codex-lab.ps1 suite
+.\bin\codex-lab.ps1 resume
 ```
 
-Puis tu analyses les résultats.
+La reprise conserve les cas et runs valides. Elle reprend à la première étape manquante : cas, baseline, run avec prompt ou comparaison. Une panne d’infrastructure Codex ou une vraie limite détectée dans le diagnostic technique d’une commande en échec arrête la suite proprement.
+
+Ne relancez pas la suite pour « tester » un quota. La détection est passive et ne scanne jamais aveuglément le cas ou la réponse métier.
+
+## 4. Lire les résultats
+
+```powershell
+.\bin\codex-lab.ps1 results
+```
+
+Le dossier par défaut est `../codex-playbook-test-runs`. Il contient `suite-summary.md`, `generated-manifest.json` et un dossier humain par prompt/cas. Le fingerprint SHA-256 complet garantit qu’un changement du chemin, du bloc de prompt ou de l’index de cas est détecté.
+
+Les preuves d’un run incluent : entrée Codex, sortie finale, stdout/stderr, log, exit status, état Git, diff, fichiers, tests, TypeScript, `git diff --check` et résumé.
+
+## 5. Interruption
+
+Ctrl+C arrête uniquement l’arbre Codex démarré par le run courant : `taskkill /PID … /T /F` sous Windows, groupe de processus dédié sous POSIX. Les logs déjà reçus sont conservés. Avant de relancer, utilisez `check` et vérifiez `git status`.
+
+## 6. Nettoyer les résultats
+
+Interactif :
+
+```powershell
+.\bin\codex-lab.ps1 clean
+```
+
+Le chemin exact est affiché et la confirmation `SUPPRIMER` est requise. Pour une automatisation explicite :
+
+```powershell
+.\bin\codex-lab.ps1 clean --yes
+```
+
+Cette commande ne cible jamais le dépôt de test, le playbook, les credentials ou la configuration Codex.
+
+## 7. Docker
+
+```bash
+docker compose config
+docker compose build
+docker compose run --rm codex-lab check
+```
+
+Les chemins hôte peuvent être surchargés par `CODEX_LAB_PLAYBOOK_DIR` et `CODEX_LAB_RESULTS_DIR`. Sur Docker Desktop, partagez avec Docker les lecteurs contenant ces dossiers.
+
+Pour les runs Codex, injectez `OPENAI_API_KEY` au runtime. L’entrypoint utilise `codex login --with-api-key`; aucune clé ne doit apparaître dans Dockerfile, Compose, Git ou une image. Un montage privé de `CODEX_HOME` est possible pour un login ChatGPT déjà établi, mais `auth.json` est un secret et ne doit jamais être copié dans l’image.
+
+## 8. Dépannage rapide
+
+- `Codex CLI introuvable` : installez `@openai/codex` puis vérifiez `codex --version`.
+- `Run réel refusé` : inspectez `git status`; faites revoir et versionnez les fichiers voulus avant de relancer.
+- `Prompt ambigu` : utilisez l’ID complet ou le chemin relatif donné par `list`.
+- `unknown` : ce statut n’est accepté qu’avec une sortie finale non vide dans un ancien cas réellement indéterminé. Un code non nul reste toujours un échec.
+- sandbox/EPERM : consultez `codex-stderr.txt` et les validations ; ce diagnostic reste distinct d’un défaut fonctionnel du repository.

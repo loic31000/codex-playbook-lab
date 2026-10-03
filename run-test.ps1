@@ -59,7 +59,8 @@ function Write-UiStatus {
 
 function Format-Elapsed {
     param([TimeSpan]$Elapsed)
-    return ("{0:00}:{1:00}" -f [int]$Elapsed.TotalMinutes, $Elapsed.Seconds)
+    $minutes = [math]::Floor($Elapsed.TotalMinutes)
+    return ("{0:00}:{1:00}" -f [int]$minutes, $Elapsed.Seconds)
 }
 
 function Invoke-CodexProcess {
@@ -99,6 +100,16 @@ function Invoke-CodexProcess {
         }
 
         $process.WaitForExit()
+        $process.Refresh()
+
+        $resolvedExitCode = $null
+
+        try {
+            $resolvedExitCode = [int]$process.ExitCode
+        }
+        catch {
+            $resolvedExitCode = $null
+        }
 
         $stdout = if (Test-Path -LiteralPath $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
         $stderr = if (Test-Path -LiteralPath $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
@@ -115,7 +126,7 @@ function Invoke-CodexProcess {
         Write-Utf8NoBom -Path $LogFile -Content $combined
 
         return [pscustomobject]@{
-            ExitCode = $process.ExitCode
+            ExitCode = $resolvedExitCode
             Elapsed = ((Get-Date) - $started)
         }
     }
@@ -206,6 +217,21 @@ function Invoke-CodexTestRun {
         -ActivityLabel ("{0} — Codex travaille toujours..." -f $runLabel)
 
     $codexExitCode = $codexRun.ExitCode
+    $finalText = ""
+
+    if (Test-Path -LiteralPath $finalFile -PathType Leaf) {
+        $finalText = (Read-Utf8Text -Path $finalFile).Trim()
+    }
+
+    if ($null -eq $codexExitCode) {
+        if (-not [string]::IsNullOrWhiteSpace($finalText)) {
+            $codexExitCode = 0
+        }
+        else {
+            $codexExitCode = 1
+        }
+    }
+
     Write-Utf8NoBom -Path $exitFile -Content ([string]$codexExitCode)
 
     & $SaveRunScript -Name $RunName -Embedded

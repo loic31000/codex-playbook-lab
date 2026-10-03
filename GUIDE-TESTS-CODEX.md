@@ -178,18 +178,86 @@ Relance simplement :
 .\run-suite.ps1
 ```
 
-Comportement :
+Comportement normal :
 
 - un test entièrement terminé est sauté ;
-- si seul le baseline existe, le test reprend avec le prompt ;
-- si les deux runs existent mais pas la comparaison, seule la comparaison est générée ;
-- un test en erreur n'empêche pas les tests suivants de démarrer, sauf si le dépôt n'est plus propre.
+- si seul le baseline valide existe, le test reprend avec le prompt ;
+- si les deux runs valides existent mais pas la comparaison, seule la comparaison est générée ;
+- une erreur normale est enregistrée et la suite passe au test suivant.
 
-Les résultats existants ne sont pas écrasés.
+Les résultats valides existants ne sont pas écrasés.
 
 ---
 
-## 7. Où trouver les résultats
+## 7. Quota ou rate limit Codex
+
+Si Codex renvoie une limite d'utilisation ou de débit, la suite ne continue pas à produire des faux échecs.
+
+`run-suite.ps1` détecte notamment les messages liés à :
+
+```text
+429
+rate limit
+too many requests
+usage limit
+insufficient_quota
+credit_balance_exhausted
+organization_usage_limit_exceeded
+organization_spend_limit_exceeded
+project_spend_limit_exceeded
+slow_down
+```
+
+Lorsqu'une limite est détectée :
+
+```text
+test en cours
+    |
+    v
+limite Codex détectée
+    |
+    v
+suppression du run incomplet uniquement
+    |
+    v
+conservation des runs valides
+    |
+    v
+suite-summary.md = ARRÊT LIMITE
+    |
+    v
+arrêt propre de la suite
+```
+
+Aucune boucle de retry automatique n'est lancée pendant que la limite est active.
+
+Quand la limite est réinitialisée, relance simplement :
+
+```powershell
+.\run-suite.ps1
+```
+
+La suite saute les tests déjà terminés et reprend le test interrompu au bon endroit.
+
+Exemple :
+
+```text
+001 = terminé
+002 = terminé
+003 = rate limit pendant with-prompt
+004 = pas encore lancé
+
+Relance suivante :
+
+001 = sauté
+002 = sauté
+003 = baseline conservé, with-prompt relancé
+004 = lancé ensuite
+```
+
+---
+
+## 8. Où trouver les résultats
 
 Les résultats sont placés dans le dossier frère :
 
@@ -203,6 +271,7 @@ Exemple pour le test `004` :
 004-baseline\
 004-with-prompt\
 004-comparison.diff
+004-suite.log
 ```
 
 Chaque run contient notamment :
@@ -220,24 +289,25 @@ summary.txt
 files\
 ```
 
-À la fin de la suite, un résumé global est créé :
+À la fin de la suite ou après un arrêt de limite, un résumé global est créé :
 
 ```text
 ..\codex-playbook-test-runs\suite-summary.md
 ```
 
-Il contient le statut de chaque test :
+Il peut contenir les statuts :
 
 ```text
 OK
 DÉJÀ TERMINÉ
 IGNORÉ
 ÉCHEC
+ARRÊT LIMITE
 ```
 
 ---
 
-## 8. Lancer un seul test
+## 9. Lancer un seul test
 
 Pour tester uniquement un scénario :
 
@@ -252,7 +322,7 @@ Pour tester uniquement un scénario :
 
 ---
 
-## 9. Routine normale
+## 10. Routine normale
 
 ```text
 1. Créer les cas utiles
@@ -260,9 +330,10 @@ Pour tester uniquement un scénario :
 3. Commit + push
 4. Lancer .\run-suite.ps1
 5. Laisser la suite tourner
-6. Ouvrir suite-summary.md
-7. Examiner seulement les résultats intéressants
-8. Noter le verdict dans la fiche du prompt
+6. Si quota : attendre le reset puis relancer la même commande
+7. Ouvrir suite-summary.md
+8. Examiner les résultats intéressants
+9. Noter le verdict dans la fiche du prompt
 ```
 
 C'est tout.

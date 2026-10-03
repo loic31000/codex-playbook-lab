@@ -30,6 +30,99 @@ $BaselineRunPath = Join-Path $BackupRoot $BaselineName
 $WithPromptRunPath = Join-Path $BackupRoot $WithPromptName
 $ComparisonPath = Join-Path $BackupRoot "$Id-comparison.diff"
 
+function Write-AppHeader {
+    param([string]$ScriptName)
+
+    if ($Embedded) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor DarkCyan
+    Write-Host ("║  {0,-58}║" -f $RepoName) -ForegroundColor Cyan
+    Write-Host ("║  {0,-58}║" -f $ScriptName) -ForegroundColor DarkGray
+    Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Write-UiStatus {
+    param(
+        [string]$Label,
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+
+    Write-Host ("  [{0}] " -f $Label) -NoNewline -ForegroundColor $Color
+    Write-Host $Message
+}
+
+function Format-Elapsed {
+    param([TimeSpan]$Elapsed)
+    return ("{0:00}:{1:00}" -f [int]$Elapsed.TotalMinutes, $Elapsed.Seconds)
+}
+
+function Invoke-CodexProcess {
+    param(
+        [string]$InputFile,
+        [string]$FinalFile,
+        [string]$LogFile,
+        [string]$ActivityLabel
+    )
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $FinalFile + '" -'
+    $started = Get-Date
+
+    try {
+        $process = Start-Process `
+            -FilePath $env:ComSpec `
+            -ArgumentList @("/d", "/s", "/c", $codexCommand) `
+            -RedirectStandardInput $InputFile `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile `
+            -NoNewWindow `
+            -PassThru
+
+        $lastHeartbeat = -5
+
+        while (-not $process.HasExited) {
+            Start-Sleep -Milliseconds 500
+            $elapsed = (Get-Date) - $started
+
+            if ([int]$elapsed.TotalSeconds -ge ($lastHeartbeat + 5)) {
+                $lastHeartbeat = [int]$elapsed.TotalSeconds
+                Write-Host ("      ⏳ {0} — {1}" -f (Format-Elapsed $elapsed), $ActivityLabel) -ForegroundColor DarkYellow
+            }
+        }
+
+        $process.WaitForExit()
+
+        $stdout = if (Test-Path -LiteralPath $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
+        $combined = $stdout
+
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            if (-not [string]::IsNullOrWhiteSpace($combined)) {
+                $combined += [Environment]::NewLine
+            }
+
+            $combined += $stderr
+        }
+
+        Write-Utf8NoBom -Path $LogFile -Content $combined
+
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Elapsed = ((Get-Date) - $started)
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Write-Utf8NoBom {
     param(
         [string]$Path,

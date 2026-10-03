@@ -1,6 +1,8 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [string]$Name
+    [string]$Name,
+
+    [switch]$Embedded
 )
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -14,6 +16,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------------------------------------------
 
 $RepoPath = (Get-Location).Path
+$RepoName = Split-Path $RepoPath -Leaf
 $BackupRoot = Join-Path (Split-Path $RepoPath -Parent) "codex-playbook-test-runs"
 $RunPath = Join-Path $BackupRoot $Name
 $FilesPath = Join-Path $RunPath "files"
@@ -21,6 +24,21 @@ $FilesPath = Join-Path $RunPath "files"
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+
+function Write-AppHeader {
+    param([string]$ScriptName)
+
+    if ($Embedded) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor DarkCyan
+    Write-Host ("║  {0,-58}║" -f $RepoName) -ForegroundColor Cyan
+    Write-Host ("║  {0,-58}║" -f $ScriptName) -ForegroundColor DarkGray
+    Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor DarkCyan
+    Write-Host ""
+}
 
 function Write-Utf8NoBom {
     param(
@@ -54,10 +72,10 @@ function Invoke-AndCapture {
     Write-Utf8NoBom -Path $OutputFile -Content $output
 
     if ($exitCode -eq 0) {
-        Write-Host ("    [OK] {0}" -f $Label)
+        Write-Host ("    ✓ {0}" -f $Label) -ForegroundColor Green
     }
     else {
-        Write-Host ("    [ÉCHEC] {0} (code {1}, détail : {2})" -f $Label, $exitCode, (Split-Path $OutputFile -Leaf))
+        Write-Host ("    ✗ {0} — code {1} — détail : {2}" -f $Label, $exitCode, (Split-Path $OutputFile -Leaf)) -ForegroundColor Red
     }
 
     return $exitCode
@@ -66,6 +84,8 @@ function Invoke-AndCapture {
 # ------------------------------------------------------------
 # Vérifications
 # ------------------------------------------------------------
+
+Write-AppHeader -ScriptName "save-run.ps1 • Validation et sauvegarde"
 
 if (-not (Test-Path ".git")) {
     throw "Ce script doit être exécuté depuis la racine du dépôt Git."
@@ -77,7 +97,7 @@ if (Test-Path $RunPath) {
 
 New-Item -ItemType Directory -Force -Path $FilesPath | Out-Null
 
-Write-Host "  Validation :"
+Write-Host "  VALIDATION" -ForegroundColor DarkCyan
 
 # ------------------------------------------------------------
 # Métadonnées du run
@@ -257,7 +277,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ([string]::IsNullOrWhiteSpace($finalStatus)) {
-    Write-Host "    [OK] Dépôt restauré"
+    Write-Host "    ✓ Dépôt restauré" -ForegroundColor Green
 }
 else {
     throw "Le dépôt n'est pas propre après restauration."

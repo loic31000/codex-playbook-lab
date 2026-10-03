@@ -73,6 +73,7 @@ function Invoke-CodexProcess {
     $stderrFile = [System.IO.Path]::GetTempFileName()
     $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $FinalFile + '" -'
     $started = Get-Date
+    $process = $null
 
     try {
         $process = Start-Process `
@@ -118,6 +119,10 @@ function Invoke-CodexProcess {
         }
     }
     finally {
+        if (($null -ne $process) -and (-not $process.HasExited)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+
         Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
     }

@@ -1,7 +1,11 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$Name
 )
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 
 $ErrorActionPreference = "Stop"
 

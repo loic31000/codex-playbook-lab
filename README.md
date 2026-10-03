@@ -11,6 +11,10 @@
 
 Codex Playbook Lab compare, prompt par prompt, le comportement de Codex sans consigne spécialisée (baseline) puis avec les prompts du playbook français. Le moteur est commun à Windows, Linux/macOS et Docker : toute la logique métier vit dans `src/`, en Node.js standard.
 
+## Projet associé
+
+Ce dépôt est le laboratoire de test et de validation du projet [Codex Engineering Playbook FR](https://github.com/loic31000/codex-engineering-playbook-fr). Le playbook contient les prompts à évaluer ; Codex Playbook Lab les découvre, les exécute en comparaison baseline/avec prompt, puis conserve les résultats et validations.
+
 ## Architecture
 
 - `src/cli.mjs` : commandes et menu communs ;

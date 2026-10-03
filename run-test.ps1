@@ -3,7 +3,8 @@
     [string]$Id,
 
     [Parameter(Mandatory = $true)]
-    [string]$Story,
+    [Alias("Story")]
+    [string]$Case,
 
     [Parameter(Mandatory = $true)]
     [string]$PromptPath
@@ -143,15 +144,15 @@ if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
     throw "La commande 'codex' est introuvable. Vérifie que Codex CLI est installé et connecté."
 }
 
-if (-not (Test-Path -LiteralPath $Story -PathType Leaf)) {
-    throw "Story introuvable : $Story"
+if (-not (Test-Path -LiteralPath $Case -PathType Leaf)) {
+    throw "Cas de test introuvable : $Case"
 }
 
-$storyGitPath = $Story -replace '\\', '/'
-git ls-files --error-unmatch -- $storyGitPath *> $null
+$caseGitPath = $Case -replace '\\', '/'
+git ls-files --error-unmatch -- $caseGitPath *> $null
 
 if ($LASTEXITCODE -ne 0) {
-    throw "La Story doit être commitée dans Git avant le test : $Story"
+    throw "Le cas de test doit être commité dans Git avant le test : $Case"
 }
 
 if (-not (Test-Path -LiteralPath $PromptPath -PathType Leaf)) {
@@ -169,19 +170,21 @@ if (Test-Path -LiteralPath $WithPromptRunPath) {
 Assert-CleanRepository
 
 $promptBlock = Get-PromptBlock -Path $PromptPath
+$caseContent = Get-Content -LiteralPath $Case -Raw
 
 $baselineInput = @"
-Implémente la Story décrite dans :
+Exécute la demande décrite dans le cas de test ci-dessous.
+Utilise le repository comme contexte et modifie le code uniquement si le cas le demande.
 
-$Story
+$caseContent
 "@
 
 $withPromptInput = @"
 $promptBlock
 
-Story à implémenter :
+Cas de test à traiter :
 
-$Story
+$caseContent
 "@
 
 Invoke-CodexTestRun -RunName $BaselineName -InputText $baselineInput

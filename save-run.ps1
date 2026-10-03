@@ -3,8 +3,8 @@
     [string]$Name
 )
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 
 $ErrorActionPreference = "Stop"

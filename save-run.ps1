@@ -39,9 +39,6 @@ function Invoke-AndCapture {
         [string]$OutputFile
     )
 
-    Write-Host ""
-    Write-Host "==> $Label"
-
     $previousErrorActionPreference = $ErrorActionPreference
 
     try {
@@ -56,7 +53,12 @@ function Invoke-AndCapture {
 
     Write-Utf8NoBom -Path $OutputFile -Content $output
 
-    Write-Host $output
+    if ($exitCode -eq 0) {
+        Write-Host ("    [OK] {0}" -f $Label)
+    }
+    else {
+        Write-Host ("    [ÉCHEC] {0} (code {1}, détail : {2})" -f $Label, $exitCode, (Split-Path $OutputFile -Leaf))
+    }
 
     return $exitCode
 }
@@ -75,10 +77,7 @@ if (Test-Path $RunPath) {
 
 New-Item -ItemType Directory -Force -Path $FilesPath | Out-Null
 
-Write-Host ""
-Write-Host "Sauvegarde du run : $Name"
-Write-Host "Repo              : $RepoPath"
-Write-Host "Destination       : $RunPath"
+Write-Host "  Validation :"
 
 # ------------------------------------------------------------
 # Métadonnées du run

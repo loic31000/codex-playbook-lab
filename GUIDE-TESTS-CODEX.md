@@ -15,10 +15,12 @@ Tu indiques simplement le fichier du prompt avec `-PromptPath`.
 
 ## 1. Avant de commencer
 
-Place-toi dans le dépôt :
+Ouvre PowerShell dans le dépôt `codex-playbook-tests`.
+
+Si nécessaire :
 
 ```powershell
-cd C:\Users\sion\codex-playbook-tests
+cd <chemin-vers>\codex-playbook-tests
 ```
 
 Récupère les dernières modifications :
@@ -187,10 +189,10 @@ Tu n'as plus besoin de lancer manuellement les deux runs ni `save-run.ps1`.
 
 ## 8. Où trouver les résultats
 
-Les résultats sont enregistrés à côté du dépôt :
+Les résultats sont enregistrés dans un dossier frère du dépôt :
 
 ```text
-C:\Users\sion\codex-playbook-test-runs\
+..\codex-playbook-test-runs\
 ```
 
 Pour le test `004` :

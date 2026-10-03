@@ -4,7 +4,12 @@
   "private": true,
   "scripts": {
     "test": "vitest",
+    "test:lab": "node --test tests/lab/*.node.mjs",
+    "check": "node src/cli.mjs check",
     "dev": "tsx src/server.ts"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

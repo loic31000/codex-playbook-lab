@@ -228,30 +228,37 @@ Write-Utf8NoBom `
 # Réinitialisation
 # ------------------------------------------------------------
 
-Write-Host ""
-Write-Host "==> Réinitialisation du dépôt"
+$previousErrorActionPreference = $ErrorActionPreference
 
-git reset --hard HEAD
+try {
+    $ErrorActionPreference = "Continue"
+    git reset --hard HEAD *> $null
+    $resetExitCode = $LASTEXITCODE
 
-if ($LASTEXITCODE -ne 0) {
-    throw "git reset --hard HEAD a échoué. Le dépôt n'a pas été nettoyé."
+    if ($resetExitCode -ne 0) {
+        throw "git reset --hard HEAD a échoué. Le dépôt n'a pas été nettoyé."
+    }
+
+    git clean -fd *> $null
+    $cleanExitCode = $LASTEXITCODE
+
+    if ($cleanExitCode -ne 0) {
+        throw "git clean -fd a échoué."
+    }
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
 }
 
-git clean -fd
+$finalStatus = git status --porcelain | Out-String
 
 if ($LASTEXITCODE -ne 0) {
-    throw "git clean -fd a échoué."
+    throw "Impossible de vérifier l'état final du dépôt."
 }
 
-# ------------------------------------------------------------
-# Vérification finale
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "==> État final"
-
-git status
-
-Write-Host ""
-Write-Host "Run sauvegardé dans :"
-Write-Host $RunPath
+if ([string]::IsNullOrWhiteSpace($finalStatus)) {
+    Write-Host "    [OK] Dépôt restauré"
+}
+else {
+    throw "Le dépôt n'est pas propre après restauration."
+}

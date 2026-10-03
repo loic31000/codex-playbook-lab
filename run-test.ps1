@@ -190,25 +190,19 @@ function Invoke-CodexTestRun {
     Write-Utf8NoBom -Path $inputFile -Content $InputText
 
     $runLabel = if ($RunName -like "*-baseline") { "BASELINE" } else { "AVEC PROMPT" }
-    Write-Host ("  [{0}] Exécution Codex..." -f $runLabel)
+    $runColor = if ($runLabel -eq "BASELINE") { [ConsoleColor]::Cyan } else { [ConsoleColor]::Magenta }
+    Write-UiStatus -Label $runLabel -Message "Exécution Codex..." -Color $runColor
 
-    $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $finalFile + '" - 2>&1'
+    $codexRun = Invoke-CodexProcess `
+        -InputFile $inputFile `
+        -FinalFile $finalFile `
+        -LogFile $logFile `
+        -ActivityLabel ("{0} — Codex travaille toujours..." -f $runLabel)
 
-    $previousErrorActionPreference = $ErrorActionPreference
-
-    try {
-        $ErrorActionPreference = "Continue"
-        $codexOutput = Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand | Out-String
-        $codexExitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    Write-Utf8NoBom -Path $logFile -Content $codexOutput
+    $codexExitCode = $codexRun.ExitCode
     Write-Utf8NoBom -Path $exitFile -Content ([string]$codexExitCode)
 
-    & $SaveRunScript -Name $RunName
+    & $SaveRunScript -Name $RunName -Embedded
 
     $runPath = Join-Path $BackupRoot $RunName
 
@@ -229,7 +223,7 @@ function Invoke-CodexTestRun {
         throw "Codex a terminé avec le code $codexExitCode pendant '$RunName' (voir codex-log.txt)."
     }
 
-    Write-Host ("    [OK] {0}" -f $runLabel)
+    Write-Host ("    ✓ {0} terminé en {1}" -f $runLabel, (Format-Elapsed $codexRun.Elapsed)) -ForegroundColor Green
 }
 
 function Get-SavedRunExitCode {
@@ -267,7 +261,7 @@ function Remove-InvalidSavedRun {
 
     if (($null -eq $exitCode) -or ($exitCode -ne 0)) {
         Write-Host ""
-        Write-Host "$Label invalide détecté. Suppression avant reprise."
+        Write-Host ("  ! {0} invalide détecté — reprise propre." -f $Label) -ForegroundColor Yellow
         Remove-Item -LiteralPath $RunPath -Recurse -Force
 
         if (Test-Path -LiteralPath $ComparisonPath) {
@@ -278,7 +272,7 @@ function Remove-InvalidSavedRun {
 
 function New-Comparison {
     Write-Host ""
-    Write-Host "  [COMPARAISON] Génération..."
+    Write-UiStatus -Label "COMPARAISON" -Message "Génération..." -Color DarkCyan
 
     $baselineFiles = Join-Path $BaselineRunPath "files"
     $withPromptFiles = Join-Path $WithPromptRunPath "files"
@@ -299,7 +293,7 @@ function New-Comparison {
     }
 
     Write-Utf8NoBom -Path $ComparisonPath -Content $comparison
-    Write-Host "    [OK] Comparaison"
+    Write-Host "    ✓ Comparaison créée" -ForegroundColor Green
 }
 
 if (-not (Test-Path ".git")) {
@@ -384,7 +378,7 @@ if (-not $baselineExists) {
 }
 else {
     Write-Host ""
-    Write-Host "Baseline déjà présent pour $Id. Reprise au run avec prompt."
+    Write-Host "  ✓ Baseline déjà présent — reprise avec prompt" -ForegroundColor DarkGreen
 }
 
 Assert-CleanRepository
@@ -394,7 +388,7 @@ if (-not $withPromptExists) {
 }
 else {
     Write-Host ""
-    Write-Host "Run avec prompt déjà présent pour $Id. Reprise à la comparaison."
+    Write-Host "  ✓ Run avec prompt déjà présent — reprise à la comparaison" -ForegroundColor DarkGreen
 }
 
 Assert-CleanRepository
@@ -403,4 +397,4 @@ if (-not $comparisonExists) {
     New-Comparison
 }
 
-Write-Host ("  [OK] Test {0} terminé" -f $Id)
+Write-Host ("  ✓ Test {0} terminé" -f $Id) -ForegroundColor Green

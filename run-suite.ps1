@@ -341,7 +341,27 @@ function Get-FriendlyId {
     $item = "00"
     $title = $stem
 
-    if ($stem -match '^(\d+)\s*-\s*(.+)
+    if ($stem -match '^(\d+)\s*-\s*(.+)$') {
+        $item = $Matches[1]
+        $title = $Matches[2]
+    }
+
+    $slug = Convert-ToSlug -Text $title
+
+    if ([string]::IsNullOrWhiteSpace($slug)) {
+        $slug = "prompt"
+    }
+
+    $id = "$section-$item-$slug"
+
+    if ($CaseIndex -gt 1) {
+        $id += "-c$CaseIndex"
+    }
+
+    return $id
+}
+
+function Get-RunExitCode {
     param(
         [string]$RunPath
     )

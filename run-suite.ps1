@@ -282,6 +282,8 @@ Règles :
 - n'inclus pas le texte du prompt dans le cas ;
 - utilise le repository courant quand le prompt concerne du code ;
 - sous Windows PowerShell 5.1, lis les fichiers texte explicitement en UTF-8 afin de préserver les accents ;
+- n’interprète pas une erreur EPERM, Access denied ou une restriction du sandbox comme un défaut du repository ;
+- n’exécute des tests, builds ou validations que s’ils sont réellement utiles à la tâche évaluée ;
 - si le prompt porte sur une review, un diagnostic, des logs, une architecture, une spécification ou de la documentation, fournis dans le cas tout le matériau concret nécessaire ;
 - introduis une ambiguïté seulement si elle est pertinente pour ce prompt ;
 - évite les dépendances externes et les services réseau ;
@@ -299,12 +301,14 @@ Retourne uniquement le Markdown du cas de test.
 
     try {
         $ErrorActionPreference = "Continue"
-        Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand | Tee-Object -FilePath $GenerationLogPath
+        $generationOutput = Read-Utf8Text -Path $inputFile | & $env:ComSpec /d /s /c $codexCommand | Out-String
         $exitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+
+    Write-Utf8NoBom -Path $GenerationLogPath -Content $generationOutput
 
     if ($exitCode -ne 0) {
         $logText = ""
@@ -314,7 +318,7 @@ Retourne uniquement le Markdown du cas de test.
         }
 
         Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        throw ("CASE_GENERATION_FAILED [$Id] code=$exitCode" + [Environment]::NewLine + $logText)
+        throw "CASE_GENERATION_FAILED [$Id] code=$exitCode (voir le log de génération)."
     }
 
     if (-not (Test-Path -LiteralPath $finalFile -PathType Leaf)) {
@@ -331,6 +335,7 @@ Retourne uniquement le Markdown du cas de test.
 
     Write-Utf8NoBom -Path $CasePath -Content ($generated + [Environment]::NewLine)
     Remove-Item -LiteralPath $tempRoot -Recurse -Force
+    Write-Host "    [OK] Cas généré"
 }
 
 function Write-ResultPackage {
@@ -494,6 +499,7 @@ $results = @()
 $startedAt = Get-Date
 $stoppedForLimit = $false
 $stoppedForInfrastructure = $false
+$position = 0
 
 Write-Host ""
 Write-Host "============================================================"
@@ -506,6 +512,7 @@ Write-Host "Tests à traiter  : $($tests.Count)"
 Write-Host ""
 
 foreach ($test in $tests) {
+    $position++
     $id = $test.Id
     $casePath = $test.CasePath
     $promptPath = $test.PromptPath
@@ -518,7 +525,7 @@ foreach ($test in $tests) {
     $generationLogPath = Join-Path $GeneratedCasesRoot "$id-generation.log"
 
     if ((Test-Path -LiteralPath $baselinePath) -and (Test-Path -LiteralPath $withPromptPath) -and (Test-Path -LiteralPath $comparisonPath)) {
-        Write-Host "[$id] déjà terminé : $promptRelativePath"
+        Write-Host ("[{0}/{1}] {2} -> DÉJÀ TERMINÉ" -f $position, $tests.Count, $promptRelativePath)
         Write-ResultPackage -Id $id -PromptRelativePath $promptRelativePath -CasePath $casePath -BaselinePath $baselinePath -WithPromptPath $withPromptPath -ComparisonPath $comparisonPath
 
         $results += [pscustomobject]@{
@@ -532,21 +539,25 @@ foreach ($test in $tests) {
     }
 
     Write-Host ""
-    Write-Host "------------------------------------------------------------"
-    Write-Host "TEST $id"
-    Write-Host "Prompt : $promptRelativePath"
-    Write-Host "------------------------------------------------------------"
+    Write-Host ("[{0}/{1}] {2}" -f $position, $tests.Count, $promptRelativePath)
 
     if (-not (Test-Path -LiteralPath $casePath -PathType Leaf)) {
-        Write-Host "Génération automatique du cas..."
+        Write-Host "  [CAS] Génération..."
 
         try {
             Invoke-CaseGeneration -Id $id -PromptRelativePath $promptRelativePath -PromptBlock $test.PromptBlock -CasePath $casePath -GenerationLogPath $generationLogPath
         }
         catch {
             $message = $_.Exception.Message
+            $generationLogText = ""
 
-            if (Test-IsCodexLimitError -Text $message) {
+            if (Test-Path -LiteralPath $generationLogPath -PathType Leaf) {
+                $generationLogText = Read-Utf8Text -Path $generationLogPath
+            }
+
+            $combinedGenerationError = $generationLogText + [Environment]::NewLine + $message
+
+            if (Test-IsCodexLimitError -Text $combinedGenerationError) {
                 Write-Host ""
                 Write-Host "[$id] LIMITE CODEX DÉTECTÉE pendant la génération du cas."
                 Write-Host "La suite s'arrête proprement."
@@ -563,7 +574,7 @@ foreach ($test in $tests) {
                 break
             }
 
-            if (Test-IsFatalInfrastructureError -Text $message) {
+            if (Test-IsFatalInfrastructureError -Text $combinedGenerationError) {
                 Write-Host ""
                 Write-Host "[$id] ERREUR INFRASTRUCTURE CODEX"
                 Write-Host "La suite s'arrête pour éviter de gaspiller des exécutions."
@@ -581,7 +592,7 @@ foreach ($test in $tests) {
             }
 
             Write-Host ""
-            Write-Host "[$id] ÉCHEC GÉNÉRATION : $message"
+            Write-Host ("  [ÉCHEC] Génération du cas (voir {0})" -f (Split-Path $generationLogPath -Leaf))
 
             $results += [pscustomobject]@{
                 Id = $id
@@ -594,7 +605,7 @@ foreach ($test in $tests) {
         }
     }
     else {
-        Write-Host "Cas généré déjà présent, réutilisation."
+        Write-Host "  [CAS] Réutilisé"
     }
 
     try {
@@ -617,7 +628,16 @@ foreach ($test in $tests) {
             $logText = Read-Utf8Text -Path $runLogPath
         }
 
-        $combinedError = $logText + [Environment]::NewLine + $message
+        $codexLogText = ""
+        foreach ($candidateRunPath in @($baselinePath, $withPromptPath)) {
+            $candidateLogPath = Join-Path $candidateRunPath "codex-log.txt"
+            if (Test-Path -LiteralPath $candidateLogPath -PathType Leaf) {
+                $codexLogText += Read-Utf8Text -Path $candidateLogPath
+                $codexLogText += [Environment]::NewLine
+            }
+        }
+
+        $combinedError = $logText + [Environment]::NewLine + $codexLogText + [Environment]::NewLine + $message
 
         if (Test-IsCodexLimitError -Text $combinedError) {
             $removed = Remove-LimitInterruptedArtifacts -BaselinePath $baselinePath -WithPromptPath $withPromptPath -ComparisonPath $comparisonPath
@@ -661,7 +681,7 @@ foreach ($test in $tests) {
         }
 
         Write-Host ""
-        Write-Host "[$id] ÉCHEC : $message"
+        Write-Host ("  [ÉCHEC] Test {0} : {1}" -f $id, $message)
 
         $results += [pscustomobject]@{
             Id = $id
@@ -761,7 +781,7 @@ Write-Host "Échecs génération     : $generationFailedCount"
 Write-Host "Échecs test           : $failedCount"
 Write-Host "Arrêts limite Codex   : $limitStopCount"
 Write-Host "Arrêts infrastructure : $infraStopCount"
-Write-Host "Résumé                : $SummaryPath"
-Write-Host "Manifest              : $ManifestPath"
+Write-Host "Résumé                : ..\codex-playbook-test-runs\suite-summary.md"
+Write-Host "Manifest              : ..\codex-playbook-test-runs\generated-manifest.json"
 Write-Host ""
 Write-Host "Pour reprendre : .\run-suite.ps1"

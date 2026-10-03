@@ -1,5 +1,14 @@
 # Codex Playbook Lab
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Node.js-20%2B-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js 20+">
+  <img src="https://img.shields.io/badge/PowerShell-5.1-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell 5.1">
+  <img src="https://img.shields.io/badge/Bash-Linux%20%2F%20macOS-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white" alt="Bash">
+  <img src="https://img.shields.io/badge/Docker-supported-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/Codex%20CLI-0.160.0-000000?style=for-the-badge" alt="Codex CLI 0.160.0">
+  <img src="https://img.shields.io/badge/Prompts-114-6f42c1?style=for-the-badge" alt="114 prompts">
+</p>
+
 Codex Playbook Lab compare, prompt par prompt, le comportement de Codex sans consigne spécialisée (baseline) puis avec les prompts du playbook français. Le moteur est commun à Windows, Linux/macOS et Docker : toute la logique métier vit dans `src/`, en Node.js standard.
 
 ## Architecture

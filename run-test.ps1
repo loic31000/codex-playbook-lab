@@ -23,12 +23,13 @@ $RepoName = Split-Path $RepoPath -Leaf
 $SaveRunScript = Join-Path $RepoPath "save-run.ps1"
 $BackupRoot = Join-Path (Split-Path $RepoPath -Parent) "codex-playbook-test-runs"
 
-$BaselineName = "$Id-baseline"
-$WithPromptName = "$Id-with-prompt"
+$TestRoot = Join-Path $BackupRoot $Id
+$BaselineName = Join-Path $Id "base"
+$WithPromptName = Join-Path $Id "prompt"
 
-$BaselineRunPath = Join-Path $BackupRoot $BaselineName
-$WithPromptRunPath = Join-Path $BackupRoot $WithPromptName
-$ComparisonPath = Join-Path $BackupRoot "$Id-comparison.diff"
+$BaselineRunPath = Join-Path $TestRoot "base"
+$WithPromptRunPath = Join-Path $TestRoot "prompt"
+$ComparisonPath = Join-Path $TestRoot "diff.patch"
 
 function Write-AppHeader {
     param([string]$ScriptName)
@@ -194,7 +195,7 @@ function Invoke-CodexTestRun {
 
     Write-Utf8NoBom -Path $inputFile -Content $InputText
 
-    $runLabel = if ($RunName -like "*-baseline") { "BASELINE" } else { "AVEC PROMPT" }
+    $runLabel = if ((Split-Path $RunName -Leaf) -eq "base") { "BASELINE" } else { "AVEC PROMPT" }
     $runColor = if ($runLabel -eq "BASELINE") { [ConsoleColor]::Cyan } else { [ConsoleColor]::Magenta }
     Write-UiStatus -Label $runLabel -Message "Exécution Codex..." -Color $runColor
 

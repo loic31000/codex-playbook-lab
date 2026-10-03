@@ -168,22 +168,20 @@ function Test-IsCodexLimitError {
     }
 
     $patterns = @(
-        '(?i)\b429\b',
-        '(?i)rate[ _-]?limit',
-        '(?i)too many requests',
-        '(?i)usage[ _-]?limit',
-        '(?i)usage limit reached',
-        '(?i)limit reached',
-        '(?i)insufficient_quota',
-        '(?i)credit_balance_exhausted',
-        '(?i)organization_usage_limit_exceeded',
-        '(?i)organization_spend_limit_exceeded',
-        '(?i)project_spend_limit_exceeded',
-        '(?i)quota exceeded',
-        '(?i)quota.*exhausted',
-        '(?i)you.?ve hit.*limit',
-        '(?i)you have hit.*limit',
-        '(?i)slow_down'
+        '(?i)\bHTTP\s*429\b',
+        '(?i)\bstatus(?: code)?\s*[:=]?\s*429\b',
+        '(?i)\brate_limit_exceeded\b',
+        '(?i)\btoo many requests\b',
+        '(?i)\binsufficient_quota\b',
+        '(?i)\bcredit_balance_exhausted\b',
+        '(?i)\borganization_usage_limit_exceeded\b',
+        '(?i)\borganization_spend_limit_exceeded\b',
+        '(?i)\bproject_spend_limit_exceeded\b',
+        '(?i)\bquota exceeded\b',
+        '(?i)\bquota exhausted\b',
+        '(?i)\byou.?ve hit your usage limit\b',
+        '(?i)\byou have hit your usage limit\b',
+        '(?i)\bslow_down\b'
     )
 
     foreach ($pattern in $patterns) {

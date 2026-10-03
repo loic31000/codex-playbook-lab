@@ -57,6 +57,7 @@ function Invoke-CodexProcess {
     $stderrFile = [System.IO.Path]::GetTempFileName()
     $codexCommand = 'codex exec --ephemeral --color never --output-last-message "' + $FinalFile + '" -'
     $started = Get-Date
+    $process = $null
 
     try {
         $process = Start-Process `
@@ -102,6 +103,10 @@ function Invoke-CodexProcess {
         }
     }
     finally {
+        if (($null -ne $process) -and (-not $process.HasExited)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+
         Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
     }
@@ -695,7 +700,7 @@ foreach ($test in $tests) {
     }
 
     try {
-        & $RunTestScript -Id $id -Case $casePath -PromptPath $promptPath -AllowUntrackedCase -Embedded *>&1 | Tee-Object -FilePath $runLogPath
+        & $RunTestScript -Id $id -Case $casePath -PromptPath $promptPath -AllowUntrackedCase -Embedded
 
         Write-ResultPackage -Id $id -PromptRelativePath $promptRelativePath -CasePath $casePath -BaselinePath $baselinePath -WithPromptPath $withPromptPath -ComparisonPath $comparisonPath
 

@@ -28,17 +28,112 @@ test('découverte benchmark, Markdown ordinaire ignoré et sélection sans hash'
   assert.deepEqual(selectBenchmarks(records, records[0].id), records);
 });
 
-test('les trois benchmarks 09-01 versionnés sont découverts et déterministes', async () => {
+test('les dix benchmarks 09-01 versionnés sont découverts et déterministes', async () => {
   const records = await discoverBenchmarks(path.resolve('benchmarks'), [prompt]);
-  assert.deepEqual(records.map((item) => item.benchmarkId), ['001-ajouter-tache', '002-priorite-ambiguite', '003-lister-taches']);
-  assert.deepEqual(records.map((item) => item.expectation), ['implementation', 'clarification', 'implementation']);
-  const ambiguity = records[1];
-  assert.match(ambiguity.caseText, /expectation: clarification/);
-  assert.match(ambiguity.executionText, /attribuer une priorité à une tâche/i);
-  assert.match(ambiguity.executionText, /si aucune priorité n['’]est fournie[^;\n]*priorité par défaut/i);
-  assert.doesNotMatch(ambiguity.executionText, /format: codex-lab-benchmark|expectation: clarification/);
-  assert.doesNotMatch(ambiguity.executionText, /\b(?:low|medium|high)\b/i);
-  assert.doesNotMatch(ambiguity.executionText, /ne sont pas définies|non définies|information manquante|ambiguïté|clarification nécessaire/i);
+  assert.deepEqual(records.map((item) => item.benchmarkId), [
+    '001-ajouter-tache', '002-priorite-ambiguite', '003-lister-taches', '004-renommer-contrat-mutation',
+    '005-rechercher-contrat-absence', '006-titre-bornes-1-80', '007-recherche-absence-hors-perimetre',
+    '008-api-publique-index', '009-validation-titre-partagee', '010-priorite-contrat-complet-multifichier',
+  ]);
+  assert.deepEqual(records.map((item) => item.expectation), [
+    'implementation', 'clarification', 'implementation', 'clarification', 'clarification', 'implementation', 'implementation',
+    'implementation', 'implementation', 'implementation',
+  ]);
+  const priorityAmbiguity = records[1];
+  assert.match(priorityAmbiguity.caseText, /expectation: clarification/);
+  assert.match(priorityAmbiguity.executionText, /attribuer une priorité à une tâche/i);
+  assert.match(priorityAmbiguity.executionText, /si aucune priorité n['’]est fournie[^;\n]*priorité par défaut/i);
+  assert.doesNotMatch(priorityAmbiguity.executionText, /format: codex-lab-benchmark|expectation: clarification/);
+  assert.doesNotMatch(priorityAmbiguity.executionText, /\b(?:low|medium|high)\b/i);
+  assert.doesNotMatch(priorityAmbiguity.executionText, /ne sont pas définies|non définies|information manquante|ambiguïté|clarification nécessaire/i);
+
+  const renameAmbiguity = records[3];
+  assert.match(renameAmbiguity.caseText, /expectation: clarification/);
+  assert.match(renameAmbiguity.executionText, /renommer une tâche existante/i);
+  assert.match(renameAmbiguity.executionText, /fonction publique `renameTask\(task, newTitle\)`/i);
+  assert.match(renameAmbiguity.executionText, /`newTitle` est normalisé avec `trim\(\)`/i);
+  assert.match(renameAmbiguity.executionText, /titre vide après normalisation est refusé/i);
+  assert.match(renameAmbiguity.executionText, /identifiant de la tâche est conservé/i);
+  assert.match(renameAmbiguity.executionText, /valeur de `completed` est conservée/i);
+  assert.match(renameAmbiguity.executionText, /fonction retourne une `Task`/i);
+  assert.doesNotMatch(renameAmbiguity.executionText, /format: codex-lab-benchmark|expectation: clarification/);
+  assert.doesNotMatch(renameAmbiguity.executionText, /mutation|muter|nouvel objet|nouveau objet|même instance|nouvelle instance|copie|identité|référence|ambiguïté|clarification|information manquante|ne sont pas définies|non définies/i);
+
+  const absenceAmbiguity = records[4];
+  assert.match(absenceAmbiguity.caseText, /expectation: clarification/);
+  assert.match(absenceAmbiguity.executionText, /findTaskById\(tasks, id\)/);
+  assert.match(absenceAmbiguity.executionText, /lorsqu’une tâche possède l’identifiant demandé, cette tâche est retournée/i);
+  assert.match(absenceAmbiguity.executionText, /lorsqu’aucune tâche ne possède l’identifiant demandé est couvert par un test automatisé/i);
+  assert.doesNotMatch(absenceAmbiguity.executionText, /format: codex-lab-benchmark|expectation: clarification/);
+  assert.doesNotMatch(absenceAmbiguity.executionText, /\bundefined\b|\bnull\b|\bthrow\b|\bexception\b|valeur sentinelle|résultat vide|Task\s*\|\s*(?:undefined|null)/i);
+  assert.doesNotMatch(absenceAmbiguity.executionText, /ambiguïté|clarification|information manquante|(?:non|pas) défini(?:e|es|s)?/i);
+
+  const titleBoundaries = records[5];
+  assert.equal(titleBoundaries.expectation, 'implementation');
+  assert.match(titleBoundaries.caseText, /expectation: implementation/);
+  assert.match(titleBoundaries.executionText, /createTask\(title\)/);
+  assert.match(titleBoundaries.executionText, /`title` est normalisé avec `trim\(\)`/i);
+  assert.match(titleBoundaries.executionText, /entre 1 et 80 caractères inclus/i);
+  assert.match(titleBoundaries.executionText, /titre vide après normalisation est refusé/i);
+  assert.match(titleBoundaries.executionText, /titre de 81 caractères est refusé/i);
+  assert.match(titleBoundaries.executionText, /espaces internes, la casse et la ponctuation du titre sont conservés/i);
+  assert.doesNotMatch(titleBoundaries.executionText, /format: codex-lab-benchmark|expectation: implementation/);
+  const numericRules = [...titleBoundaries.executionText.matchAll(/\b\d+\b/g)].map((match) => Number(match[0]));
+  assert.deepEqual([...new Set(numericRules)].sort((a, b) => a - b), [1, 80, 81]);
+  assert.doesNotMatch(titleBoundaries.executionText, /lowercase|uppercase|toLowerCase|toUpperCase|minuscules?|majuscules?/i);
+  assert.doesNotMatch(titleBoundaries.executionText, /compact(?:er|age)|réduire les espaces internes|supprimer les espaces internes/i);
+  assert.doesNotMatch(titleBoundaries.executionText, /whitelist|liste blanche|caractères? autorisés?|interdire certains caractères/i);
+
+  const scopedSearch = records[6];
+  assert.equal(scopedSearch.expectation, 'implementation');
+  assert.match(scopedSearch.caseText, /expectation: implementation/);
+  assert.match(scopedSearch.executionText, /findTaskById\(tasks, id\)/);
+  assert.match(scopedSearch.executionText, /lorsqu’une tâche possède l’identifiant demandé, cette tâche est retournée/i);
+  assert.match(scopedSearch.executionText, /recherche ne modifie ni la collection reçue ni les tâches qu’elle contient/i);
+  assert.match(scopedSearch.executionText, /## Hors périmètre[\s\S]*comportement lorsqu’aucune tâche ne possède l’identifiant demandé/i);
+  assert.doesNotMatch(scopedSearch.executionText, /format: codex-lab-benchmark|expectation: implementation/);
+  assert.doesNotMatch(scopedSearch.executionText, /\bundefined\b|\bnull\b|\bexception\b|valeur sentinelle|type d['’]erreur/i);
+  assert.doesNotMatch(scopedSearch.executionText, /(?:test|tests|testé)[^\n.]{0,100}(?:aucune tâche|identifiant absent|cas absent)/i);
+  assert.doesNotMatch(scopedSearch.executionText, /clarification nécessaire|information manquante|décision à prendre|comportement non défini à résoudre/i);
+
+  const publicApi = records[7];
+  assert.equal(publicApi.expectation, 'implementation');
+  assert.match(publicApi.executionText, /`src\/task\.ts` expose le type `Task`/);
+  assert.match(publicApi.executionText, /createTask\(title\)/);
+  assert.match(publicApi.executionText, /`src\/index\.ts` constitue le point d’entrée public/);
+  assert.match(publicApi.executionText, /tests importent l’API testée uniquement depuis `\.\.\/src\/index\.js`/i);
+  assert.match(publicApi.executionText, /modification de `src\/server\.ts`/i);
+  assert.doesNotMatch(publicApi.executionText, /format: codex-lab-benchmark|expectation: implementation/);
+  assert.doesNotMatch(publicApi.executionText, /service layer|repository pattern|factory|classe de stockage|injection de dépendances/i);
+
+  const sharedTitleValidation = records[8];
+  assert.equal(sharedTitleValidation.expectation, 'implementation');
+  assert.match(sharedTitleValidation.executionText, /createTask\(title\)/);
+  assert.match(sharedTitleValidation.executionText, /renameTask\(task, newTitle\)/);
+  assert.match(sharedTitleValidation.executionText, /`renameTask\(task, newTitle\)` retourne une nouvelle `Task`/i);
+  assert.match(sharedTitleValidation.executionText, /`Task` reçue n’est pas modifiée/i);
+  assert.match(sharedTitleValidation.executionText, /tâche retournée conserve `id` et `completed`/i);
+  assert.match(sharedTitleValidation.executionText, /définie une seule fois dans un module dédié/i);
+  assert.match(sharedTitleValidation.executionText, /`createTask` et `renameTask` réutilisent cette même règle/i);
+  assert.match(sharedTitleValidation.executionText, /`src\/index\.ts` expose l’API publique nécessaire/i);
+  assert.doesNotMatch(sharedTitleValidation.executionText, /format: codex-lab-benchmark|expectation: implementation/);
+  assert.doesNotMatch(sharedTitleValidation.executionText, /classe abstraite|dependency injection|^\s*-\s*repository\s*;|factory|hiérarchie de services/im);
+
+  const completePriority = records[9];
+  assert.equal(completePriority.expectation, 'implementation');
+  assert.match(completePriority.executionText, /TaskPriority/);
+  assert.match(completePriority.executionText, /`"low"`, `"medium"` ou `"high"`/);
+  assert.match(completePriority.executionText, /valeur `"medium"` est utilisée/i);
+  assert.match(completePriority.executionText, /`src\/task\.ts` contient les types publics `Task` et `TaskPriority`/);
+  assert.match(completePriority.executionText, /`src\/task-service\.ts` contient `createTask`/);
+  assert.match(completePriority.executionText, /`src\/index\.ts` constitue le point d’entrée public/);
+  assert.match(completePriority.executionText, /tests importent uniquement depuis `\.\.\/src\/index\.js`/i);
+  assert.doesNotMatch(completePriority.executionText, /format: codex-lab-benchmark|expectation: implementation/);
+  const priorityValues = [...completePriority.executionText.matchAll(/`"(low|medium|high)"`/g)].map((match) => match[1]);
+  assert.deepEqual([...new Set(priorityValues)].sort(), ['high', 'low', 'medium']);
+  for (const benchmark of [publicApi, sharedTitleValidation, completePriority]) {
+    assert.doesNotMatch(benchmark.executionText, /(?:le|ce) benchmark|directement implémentable|sans clarification|ce qu['’]on cherche à tester/i);
+  }
 });
 
 test('frontmatter benchmark invalide, expectation inconnue et prompt absent sont refusés avant exécution', async (t) => {
@@ -68,44 +163,73 @@ test('fingerprint benchmark est stable et dépend du cas comme du prompt', () =>
   assert.notEqual(a, fingerprintBenchmark('benchmarks/a.md', source(), { ...prompt, fingerprint: 'q'.repeat(64) }, 'implementation'));
 });
 
-test('benchmark fixe charge case.md à l’identique sans appel de génération', async (t) => {
-  const { root, benchmarksDir } = await fixture(t); const markdown = source();
-  await writeFile(path.join(benchmarksDir, 'case.md'), markdown);
-  const [record] = await discoverBenchmarks(benchmarksDir, [prompt]);
-  const calls = []; const labels = [];
-  const result = await runOneTest({ repoDir: root, resultsDir: path.join(root, 'results') }, record, {
-    assertSafeImpl: async () => {}, restoreImpl: async () => {},
-    runCodexImpl: async ({ input, outputDir }) => { calls.push(input); await mkdir(outputDir, { recursive: true }); return { success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'fait', stdout: '', stderr: '' }; },
-    saveValidateImpl: async ({ label }) => { labels.push(label); return { tests: 0, typescript: 0, diffCheck: 0, changedFiles: 1 }; },
-    compareImpl: async (_a, _b, output) => writeFile(output, 'diff'),
-  });
-  assert.equal(result.status, 'completed'); assert.equal(calls.length, 2);
-  assert.deepEqual(labels, ['BASELINE', 'AVEC PROMPT']);
-  assert.equal(await readFile(result.paths.caseFile, 'utf8'), markdown);
-  for (const input of calls) {
-    assert.match(input, /# Cas stable/);
-    assert.doesNotMatch(input, /format: codex-lab-benchmark|expectation: implementation/);
+test('benchmarks implementation 006 à 010 masquent le frontmatter aux deux runs', async (t) => {
+  const { root } = await fixture(t);
+  const expectedInput = new Map([
+    ['006-titre-bornes-1-80', /createTask\(title\)/],
+    ['007-recherche-absence-hors-perimetre', /findTaskById\(tasks, id\)/],
+    ['008-api-publique-index', /`src\/index\.ts` constitue le point d’entrée public/],
+    ['009-validation-titre-partagee', /définie une seule fois dans un module dédié/i],
+    ['010-priorite-contrat-complet-multifichier', /TaskPriority/],
+  ]);
+  const records = (await discoverBenchmarks(path.resolve('benchmarks'), [prompt]))
+    .filter((item) => expectedInput.has(item.benchmarkId));
+  assert.deepEqual(records.map((item) => item.benchmarkId), [...expectedInput.keys()]);
+  for (const record of records) {
+    const calls = []; const labels = [];
+    const result = await runOneTest({ repoDir: root, resultsDir: path.join(root, 'results') }, record, {
+      assertSafeImpl: async () => {}, restoreImpl: async () => {},
+      runCodexImpl: async ({ input, outputDir }) => { calls.push(input); await mkdir(outputDir, { recursive: true }); return { success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'fait', stdout: '', stderr: '' }; },
+      saveValidateImpl: async ({ label }) => { labels.push(label); return { tests: 0, typescript: 0, diffCheck: 0, changedFiles: 1 }; },
+      compareImpl: async (_a, _b, output) => writeFile(output, 'diff'),
+    });
+    assert.equal(result.status, 'completed'); assert.equal(calls.length, 2);
+    assert.deepEqual(labels, ['BASELINE', 'AVEC PROMPT']);
+    assert.equal(await readFile(result.paths.caseFile, 'utf8'), record.caseText);
+    assert.match(calls[0], /^Exécute la demande/);
+    assert.match(calls[1], /^Prompt versionné/);
+    for (const input of calls) {
+      assert.match(input, expectedInput.get(record.benchmarkId));
+      assert.doesNotMatch(input, /format: codex-lab-benchmark|expectation: implementation/);
+      if (/^00(?:8|9)|^010/.test(record.benchmarkId)) {
+        assert.doesNotMatch(input, /(?:le|ce) benchmark|directement implémentable|sans clarification|ce qu['’]on cherche à tester|toutes les décisions métier nécessaires sont volontairement définies|il ne doit pas demander/i);
+      }
+    }
+    assert.match(await readFile(result.paths.result, 'utf8'), /Type : benchmark fixe[\s\S]*Attente : implementation/);
+    assert.notEqual(record.id, prompt.id);
   }
-  assert.match(await readFile(result.paths.result, 'utf8'), /Type : benchmark fixe[\s\S]*Attente : implementation/);
-  assert.notEqual(record.id, prompt.id);
 });
 
-test('benchmark clarification accepte zéro modification sans masquer les erreurs techniques', async (t) => {
+test('benchmarks clarification transmettent uniquement le body aux deux runs', async (t) => {
   const { root } = await fixture(t);
-  const record = (await discoverBenchmarks(path.resolve('benchmarks'), [prompt]))
-    .find((item) => item.benchmarkId === '002-priorite-ambiguite');
-  const calls = [];
-  const result = await runOneTest({ repoDir: root, resultsDir: path.join(root, 'results') }, record, {
-    assertSafeImpl: async () => {}, restoreImpl: async () => {},
-    runCodexImpl: async ({ input, outputDir }) => { calls.push(input); await mkdir(outputDir, { recursive: true }); return { success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'Les valeurs métier manquent. Quelles valeurs souhaitez-vous ?', stdout: '', stderr: '' }; },
-    saveValidateImpl: async () => ({ tests: 0, typescript: 0, diffCheck: 0, changedFiles: 0 }),
-    compareImpl: async (_a, _b, output) => writeFile(output, '(Aucune différence)\n'),
-  });
-  assert.equal(result.status, 'completed');
-  assert.equal(calls.length, 2);
-  for (const input of calls) {
-    assert.match(input, /priorit/i);
-    assert.doesNotMatch(input, /format: codex-lab-benchmark|expectation: clarification/);
+  const records = (await discoverBenchmarks(path.resolve('benchmarks'), [prompt]))
+    .filter((item) => ['002-priorite-ambiguite', '004-renommer-contrat-mutation', '005-rechercher-contrat-absence'].includes(item.benchmarkId));
+  assert.deepEqual(records.map((item) => item.benchmarkId), [
+    '002-priorite-ambiguite', '004-renommer-contrat-mutation', '005-rechercher-contrat-absence',
+  ]);
+  for (const record of records) {
+    const calls = [];
+    const result = await runOneTest({ repoDir: root, resultsDir: path.join(root, 'results') }, record, {
+      assertSafeImpl: async () => {}, restoreImpl: async () => {},
+      runCodexImpl: async ({ input, outputDir }) => { calls.push(input); await mkdir(outputDir, { recursive: true }); return { success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'Clarification demandée.', stdout: '', stderr: '' }; },
+      saveValidateImpl: async () => ({ tests: 0, typescript: 0, diffCheck: 0, changedFiles: 0 }),
+      compareImpl: async (_a, _b, output) => writeFile(output, '(Aucune différence)\n'),
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(calls.length, 2);
+    assert.match(calls[0], /^Exécute la demande/);
+    assert.match(calls[1], /^Prompt versionné/);
+    for (const input of calls) {
+      assert.doesNotMatch(input, /format: codex-lab-benchmark|expectation: clarification/);
+    }
+    if (record.benchmarkId === '004-renommer-contrat-mutation') {
+      assert.match(calls[0], /renameTask\(task, newTitle\)/);
+      assert.match(calls[1], /renameTask\(task, newTitle\)/);
+    }
+    if (record.benchmarkId === '005-rechercher-contrat-absence') {
+      assert.match(calls[0], /findTaskById\(tasks, id\)/);
+      assert.match(calls[1], /findTaskById\(tasks, id\)/);
+    }
   }
   const readOnly = new CodexRunError('x', { success: true, stderr: '', environmentWriteBlocked: true });
   const rateLimit = new CodexRunError('x', { success: false, stderr: 'HTTP 429 too many requests' });

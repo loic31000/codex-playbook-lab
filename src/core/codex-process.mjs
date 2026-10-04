@@ -46,20 +46,16 @@ export function resolveCodexCommand(command = process.env.CODEX_LAB_CODEX_COMMAN
   if (hasPath) return ['.cmd', '.bat'].includes(extension) ? commandShim(command) : direct(command);
 
   const directories = String(env.PATH ?? '').split(';').filter(Boolean);
-  for (const suffix of ['.exe', '.com']) {
+  for (const suffix of ['.exe', '.com', '.cmd', '.bat']) {
     for (const directory of directories) {
       const candidate = path.win32.join(directory.replace(/^"|"$/g, ''), `${command}${suffix}`);
-      if (existsSync(candidate)) return direct(candidate);
+      if (existsSync(candidate)) return ['.cmd', '.bat'].includes(suffix) ? commandShim(candidate) : direct(candidate);
     }
   }
   for (const directory of directories) {
     const base = directory.replace(/^"|"$/g, '');
     const extensionless = path.win32.join(base, command);
     if (existsSync(extensionless)) return direct(extensionless);
-    for (const suffix of ['.cmd', '.bat']) {
-      const candidate = path.win32.join(base, `${command}${suffix}`);
-      if (existsSync(candidate)) return commandShim(candidate);
-    }
   }
   return direct(command);
 }

@@ -220,8 +220,10 @@ test('SIGINT interrompt un run sans polluer le suivant', async (t) => {
 test('résolution Windows préfère le natif puis utilise le shim cmd', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-resolve-')); t.after(() => rm(root, { recursive: true, force: true }));
   const env = { PATH: root, ComSpec: 'C:\\Windows\\System32\\cmd.exe' };
+  await writeFile(path.join(root, 'codex'), 'extensionless');
   await writeFile(path.join(root, 'codex.cmd'), '@echo off');
-  assert.equal(resolveCodexCommand('codex', { platform: 'win32', env }).kind, 'cmd-shim');
+  const cmd = resolveCodexCommand('codex', { platform: 'win32', env });
+  assert.equal(cmd.kind, 'cmd-shim'); assert.equal(cmd.resolved, path.win32.join(root, 'codex.cmd'));
   await writeFile(path.join(root, 'codex.exe'), '');
   assert.equal(resolveCodexCommand('codex', { platform: 'win32', env }).kind, 'direct');
   const actual = await runCodexVersion(); assert.equal(actual.code, 0); assert.match(actual.stdout, /codex/i);

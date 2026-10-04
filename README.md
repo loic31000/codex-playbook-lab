@@ -90,6 +90,8 @@ Les chemins relatifs sont résolus depuis la racine du dépôt de test.
 
 Chaque test suit strictement : CAS → BASELINE → VALIDATION → AVEC PROMPT → VALIDATION → COMPARAISON. Un run valide est réutilisé lors d’une reprise. Les anciens dossiers `auto-*` sont migrés sans écrasement ; un fingerprint différent archive l’ancien dossier sous `_archive/`.
 
+Les runs Codex utilisent explicitement le sandbox `workspace-write`. Si Codex signale malgré cela que le workspace est en lecture seule et qu’aucune modification n’a été produite, le run est invalidé et sera rejoué lors d’une reprise. Sous Windows natif, Docker/Linux constitue la solution de repli si le sandbox refuse encore l’écriture.
+
 Chaque dossier lisible contient notamment `fingerprint.txt`, `case.md`, `generation.log`, `result.md`, `diff.patch`, `base/` et `prompt/`. Les sous-dossiers de run conservent l’entrée, la sortie finale, stdout, stderr, le log combiné, le statut structuré, le diff, les fichiers modifiés et les sorties de validation.
 
 Un run moderne n’est réutilisable que si Codex a réussi, si `git diff --check` passe et si les tests et TypeScript sont soit réussis, soit explicitement classés comme limitation d’environnement. `case.md`, les deux runs valides, `diff.patch` et `result.md` sont tous requis pour considérer un test terminé. Les anciens runs PowerShell dépourvus de `codex-status.json` et `summary.json` conservent un fallback documenté ; un run Node incomplet ne bénéficie pas de cette tolérance.

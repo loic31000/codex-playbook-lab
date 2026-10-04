@@ -64,7 +64,7 @@ export async function saveAndValidateRun({ repoDir, runDir, label, restoreImpl =
     }
     const tests = await capture('npm', ['test', '--', '--run'], repoDir, path.join(runDir, 'tests.txt'));
     const typescript = await capture('npx', ['tsc', '--noEmit'], repoDir, path.join(runDir, 'typescript.txt'));
-    results = { tests: tests.code ?? 1, typescript: typescript.code ?? 1,
+    results = { tests: tests.code ?? 1, typescript: typescript.code ?? 1, changedFiles: files.length,
       classifications: { tests: validationClassification(tests), typescript: validationClassification(typescript) } };
     const diffCheck = await git(['diff', '--check'], { cwd: repoDir });
     results.diffCheck = diffCheck.code ?? 1;

@@ -29,15 +29,15 @@ export async function runSuite(config, { selector, prepared, runOneTestImpl = ru
     } catch (error) {
       fail(`${test.id} : ${error.message}`);
       summary.push({ id: test.id, status: 'failed', error: error.message,
-        rateLimit: Boolean(error.rateLimit), infrastructure: Boolean(error.infrastructure),
+        rateLimit: Boolean(error.rateLimit), infrastructure: Boolean(error.infrastructure), environment: Boolean(error.environment),
         interruptionSignal: error.result?.interruptionSignal ?? null });
-      if (error.rateLimit || error.infrastructure || error.result?.interrupted) break;
+      if (error.rateLimit || error.infrastructure || error.environment || error.result?.interrupted) break;
     }
     await writeFile(path.join(config.resultsDir, 'suite-summary.md'), renderSummary(summary), 'utf8');
   }
   await writeFile(path.join(config.resultsDir, 'suite-summary.md'), renderSummary(summary), 'utf8');
   const interrupted = summary.find((x) => x.interruptionSignal);
-  const infrastructureFailure = summary.some((x) => x.rateLimit || x.infrastructure);
+  const infrastructureFailure = summary.some((x) => x.rateLimit || x.infrastructure || x.environment);
   const failed = summary.some((x) => x.status === 'failed');
   const exitCode = interrupted ? (interrupted.interruptionSignal === 'SIGTERM' ? 143 : 130)
     : infrastructureFailure ? 2 : failed ? 1 : 0;

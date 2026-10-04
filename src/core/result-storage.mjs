@@ -3,6 +3,37 @@ import path from 'node:path';
 
 async function exists(target) { try { await stat(target); return true; } catch { return false; } }
 
+const responseWriteBlockPatterns = [
+  /\b(?:workspace|repository|repo)\b[^\r\n.]{0,160}\b(?:mounted\s+)?read[- ]only\b/i,
+  /\bread[- ]only\s+file\s*system\b/i,
+  /\bread\s+only\s+filesystem\b/i,
+  /\b(?:cannot|can't|unable to|could not|impossible de)\b[^\r\n.]{0,80}\b(?:modify|write|edit|create|modifier|écrire|créer)\b[^\r\n.]{0,120}\b(?:read[- ]only|lecture seule)\b/i,
+  /\b(?:workspace|repository|repo|dépôt)\b[^\r\n.]{0,160}\ben lecture seule\b/i,
+  /\bmont[ée]\s+en lecture seule\b/i,
+  /\b(?:absence|pas)\s+d['’]accès\s+en écriture\b/i,
+];
+const technicalWriteBlockPatterns = [
+  /^sandbox:\s*read-only\s*$/im,
+  /writing is blocked by (?:a )?read-only sandbox/i,
+  /read[- ]only file\s*system/i,
+];
+
+export function hasWorkspaceWriteBlockedDiagnostic({ finalContent = '', stderr = '', stdout = '', inputContent = '' } = {}) {
+  const response = `${finalContent}\n${stdout}`;
+  let technical = stderr;
+  if (inputContent) {
+    for (const echoedInput of new Set([inputContent, inputContent.replace(/\r\n/g, '\n'), inputContent.replace(/(?<!\r)\n/g, '\r\n')])) {
+      technical = technical.split(echoedInput).join('');
+    }
+  }
+  return responseWriteBlockPatterns.some((pattern) => pattern.test(response))
+    || technicalWriteBlockPatterns.some((pattern) => pattern.test(technical));
+}
+
+export function isEnvironmentWriteBlocked(diagnostics, changedFiles) {
+  return changedFiles === 0 && hasWorkspaceWriteBlockedDiagnostic(diagnostics);
+}
+
 function isSameOrWithin(parent, candidate) {
   const relative = path.relative(parent, candidate);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
@@ -49,6 +80,18 @@ export async function readRunStatus(runDir) {
 
   if (!codexStatus) return { valid: false, reason: codexStatusPresent ? 'invalid-codex-status' : 'missing-codex-status', exitStatus };
   if (!summary) return { valid: false, reason: summaryPresent ? 'invalid-summary' : 'missing-summary', exitStatus };
+  const artifacts = {};
+  for (const [name, filename] of Object.entries({ stderr: 'codex-stderr.txt', stdout: 'codex-stdout.txt', inputContent: 'codex-input.txt', files: 'files-list.txt' })) {
+    try { artifacts[name] = { present: true, content: await readFile(path.join(runDir, filename), 'utf8') }; }
+    catch { artifacts[name] = { present: false, content: '' }; }
+  }
+  const changedFiles = Number.isInteger(summary.changedFiles) ? summary.changedFiles
+    : artifacts.files.present ? artifacts.files.content.split(/\r?\n/).filter(Boolean).length : null;
+  if (isEnvironmentWriteBlocked({ finalContent, stderr: artifacts.stderr.content,
+    stdout: artifacts.stdout.content, inputContent: artifacts.inputContent.content }, changedFiles)) {
+    return { valid: false, reason: 'environment-write-blocked', classification: 'environment-limitation',
+      exitStatus, fallback: false, legacy: false };
+  }
   const fallbackAllowed = exitStatus === 'unknown' && raw === 'unknown'
     && codexStatus.fallback === true && codexStatus.success === true && finalContent.trim().length > 0;
   const codexSucceeded = (exitStatus === 0 && codexStatus.success === true) || fallbackAllowed;

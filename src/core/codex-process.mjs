@@ -74,6 +74,10 @@ export function codexSpawnSpec(command, args, options = {}) {
   return { ...resolved, args, windowsVerbatimArguments: false };
 }
 
+export function defaultCodexArgs(finalFile) {
+  return ['exec', '--sandbox', 'workspace-write', '--ephemeral', '--color', 'never', '--output-last-message', finalFile, '-'];
+}
+
 export async function stopAllCodexChildren() {
   const outcomes = await Promise.all([...active.keys()].map(async (child) => ({ child, outcome: await platform.stopProcessTree(child.pid) })));
   for (const { child, outcome } of outcomes) {
@@ -128,7 +132,7 @@ export async function runCodex({ input, outputDir, finalFile = path.join(outputD
   const stderrFile = path.join(outputDir, 'codex-stderr.txt');
   const logFile = path.join(outputDir, 'codex-log.txt');
   await writeFile(path.join(outputDir, 'codex-input.txt'), input, 'utf8');
-  const codexArgs = args ?? ['exec', '--ephemeral', '--color', 'never', '--output-last-message', finalFile, '-'];
+  const codexArgs = args ?? defaultCodexArgs(finalFile);
   const started = performance.now();
   const spec = codexSpawnSpec(command, codexArgs);
   const child = spawn(spec.file, spec.args, {

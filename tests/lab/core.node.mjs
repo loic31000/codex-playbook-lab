@@ -5,24 +5,30 @@ import os from 'node:os';
 import path from 'node:path';
 import { fingerprintPrompt, slugify } from '../../src/core/fingerprints.mjs';
 import { extractPromptBlock, hasPromptFrontmatter, selectPrompt } from '../../src/core/prompt-discovery.mjs';
-import { activeCodexCount, evaluateExit, formatElapsed, isRateLimitFailure, resolveCodexCommand, runCodex, runCodexVersion } from '../../src/core/codex-process.mjs';
-import { cleanResultsSafely, getResumeState, initializeTestStorage, migrateLegacyGeneratedCase, readRunStatus, safeResultDirectory } from '../../src/core/result-storage.mjs';
+import { activeCodexCount, defaultCodexArgs, evaluateExit, formatElapsed, isRateLimitFailure, resolveCodexCommand, runCodex, runCodexVersion } from '../../src/core/codex-process.mjs';
+import { cleanResultsSafely, getResumeState, hasWorkspaceWriteBlockedDiagnostic, initializeTestStorage, isEnvironmentWriteBlocked, migrateLegacyGeneratedCase, readRunStatus, safeResultDirectory } from '../../src/core/result-storage.mjs';
 import { loadConfig, resolvePortablePath } from '../../src/core/config.mjs';
 import { runOneTest, showValidation } from '../../src/core/test-runner.mjs';
 import { run } from '../../src/core/process.mjs';
-import { assertSafeRealRun, saveAndValidateRun, validationClassification } from '../../src/core/validation.mjs';
+import { assertSafeRealRun, restoreRepository, saveAndValidateRun, validationClassification } from '../../src/core/validation.mjs';
 import { runSuite } from '../../src/core/suite-runner.mjs';
 
-async function writeSavedRun(directory, { exit = '0', modern = true, tests = 'passed', typescript = 'passed', diffCheck = 0, fallback = false } = {}) {
+async function writeSavedRun(directory, { exit = '0', modern = true, tests = 'passed', typescript = 'passed', diffCheck = 0, fallback = false,
+  finalContent = 'final', stderr = '', stdout = '', inputContent = '', files } = {}) {
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, 'codex-log.txt'), 'log');
-  await writeFile(path.join(directory, 'codex-final.txt'), 'final');
+  await writeFile(path.join(directory, 'codex-final.txt'), finalContent);
+  await writeFile(path.join(directory, 'codex-stderr.txt'), stderr);
+  await writeFile(path.join(directory, 'codex-stdout.txt'), stdout);
+  await writeFile(path.join(directory, 'codex-input.txt'), inputContent);
+  if (files) await writeFile(path.join(directory, 'files-list.txt'), `${files.join('\n')}\n`);
   await writeFile(path.join(directory, 'codex-exit-code.txt'), `${exit}\n`);
   if (modern) {
     const success = exit === '0' || (exit === 'unknown' && fallback);
     await writeFile(path.join(directory, 'codex-status.json'), JSON.stringify({ code: /^\d+$/.test(exit) ? Number(exit) : 'unknown', success, fallback }));
     await writeFile(path.join(directory, 'summary.json'), JSON.stringify({
       tests: tests === 'passed' ? 0 : 1, typescript: typescript === 'passed' ? 0 : 1, diffCheck,
+      ...(files ? { changedFiles: files.length } : {}),
       classifications: { tests, typescript },
     }));
   }
@@ -57,6 +63,12 @@ test('statuts exit code et fallback unknown', () => {
   assert.deepEqual(evaluateExit({ code: null, signal: null, finalContent: 'ok', allowUnknownFallback: true }).success, true);
   assert.deepEqual(evaluateExit({ code: null, signal: null, finalContent: '', allowUnknownFallback: true }).success, false);
   assert.deepEqual(evaluateExit({ code: null, signal: 'SIGTERM', finalContent: 'ok', allowUnknownFallback: true }).success, false);
+});
+
+test('commande Codex par défaut active explicitement workspace-write', () => {
+  const args = defaultCodexArgs('final.txt');
+  assert.deepEqual(args.slice(0, 3), ['exec', '--sandbox', 'workspace-write']);
+  assert.equal(args.includes('--full-auto'), false);
 });
 
 test('rate limit uniquement sur échec technique stderr', () => {
@@ -180,6 +192,41 @@ test('validité moderne combine Codex et toutes les validations', async (t) => {
   }
 });
 
+test('une modification réelle reste valide même si la réponse mentionne read-only', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-readonly-changed-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeSavedRun(root, { finalContent: 'La documentation mentionne « read-only », puis src/task.ts a été modifié.', files: ['src/task.ts'] });
+  assert.equal((await readRunStatus(root)).valid, true);
+  assert.equal(isEnvironmentWriteBlocked({ finalContent: 'workspace is mounted read-only' }, 1), false);
+});
+
+test('exit 0 sans changement et diagnostic read-only est invalide avec une raison explicite', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-readonly-zero-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeSavedRun(root, { finalContent: 'Impossible de modifier le repository car il est monté en lecture seule.', files: [] });
+  const status = await readRunStatus(root);
+  assert.equal(status.valid, false); assert.equal(status.reason, 'environment-write-blocked');
+  assert.equal(status.classification, 'environment-limitation');
+});
+
+test('exit non nul et diagnostic read-only reste une limitation d’environnement', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-readonly-nonzero-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeSavedRun(root, { exit: '1', stderr: 'sandbox: read-only', files: [] });
+  const status = await readRunStatus(root);
+  assert.equal(status.valid, false); assert.equal(status.reason, 'environment-write-blocked');
+  assert.equal(status.classification, 'environment-limitation');
+});
+
+test('le prompt read-only recopié dans stderr ne suffit pas à invalider un run', () => {
+  const inputContent = 'Analyse la phrase workspace is mounted read-only sans modifier de fichier.';
+  assert.equal(hasWorkspaceWriteBlockedDiagnostic({ finalContent: 'Analyse terminée.', stderr: `user\n${inputContent}\n`, inputContent }), false);
+});
+
+test('un ancien résultat moderne 09-01 read-only est reclassifié', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-09-01-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeSavedRun(root, { finalContent: 'Le workspace est monté en lecture seule. Aucun fichier modifié.', files: [] });
+  const status = await readRunStatus(root);
+  assert.deepEqual({ valid: status.valid, reason: status.reason }, { valid: false, reason: 'environment-write-blocked' });
+});
+
 test('résultat moderne incomplet et fallback unknown sont stricts', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-modern-status-')); t.after(() => rm(root, { recursive: true, force: true }));
   const missingSummary = path.join(root, 'missing-summary'); await writeSavedRun(missingSummary);
@@ -282,6 +329,59 @@ test('une exception Codex pendant un run passe encore par validation/restauratio
   assert.equal(validations, 1);
 });
 
+test('une limitation read-only sauvegarde/restaure puis invalide clairement le run', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-readonly-restore-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const resultsDir = path.join(root, 'results');
+  const record = { id: '09-01-readonly', legacyId: 'auto-readonly', fingerprint: 'e'.repeat(64), displayName: 'Read-only', promptBlock: 'Consigne' };
+  const paths = await initializeTestStorage(resultsDir, record); await writeFile(paths.caseFile, '# Cas\n');
+  let validations = 0; const logs = []; const oldLog = console.log;
+  console.log = (value) => logs.push(value);
+  try {
+    await assert.rejects(runOneTest({ repoDir: root, resultsDir }, record, {
+      assertSafeImpl: async () => {},
+      runCodexImpl: async () => ({ success: true, exitStatus: 0, elapsedSeconds: 1,
+        finalContent: 'Impossible de modifier le repository : workspace monté en lecture seule.', stdout: '', stderr: '' }),
+      saveValidateImpl: async () => { validations += 1; return { tests: 0, typescript: 0, diffCheck: 0, changedFiles: 0 }; },
+    }), (error) => error.environment === true && /lecture seule/i.test(error.message));
+  } finally { console.log = oldLog; }
+  assert.equal(validations, 1); assert.match(logs.join('\n'), /BASELINE invalide.*lecture seule/);
+  assert.doesNotMatch(logs.join('\n'), /✓ BASELINE terminé/);
+});
+
+test('le dépôt reste propre après une limitation read-only', async (t) => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-readonly-clean-')); t.after(() => rm(parent, { recursive: true, force: true }));
+  const repoDir = path.join(parent, 'repo'); const resultsDir = path.join(parent, 'results'); await mkdir(repoDir);
+  await run('git', ['init'], { cwd: repoDir }); await writeFile(path.join(repoDir, 'tracked.txt'), 'initial');
+  await run('git', ['add', 'tracked.txt'], { cwd: repoDir });
+  await run('git', ['-c', 'user.name=Codex Lab', '-c', 'user.email=lab@example.invalid', 'commit', '-m', 'fixture'], { cwd: repoDir });
+  const record = { id: '09-01-clean', legacyId: 'auto-clean', fingerprint: '7'.repeat(64), displayName: 'Clean', promptBlock: 'Consigne' };
+  const paths = await initializeTestStorage(resultsDir, record); await writeFile(paths.caseFile, '# Cas\n');
+  let restorations = 0;
+  await assert.rejects(runOneTest({ repoDir, resultsDir }, record, {
+    runCodexImpl: async () => ({ success: true, exitStatus: 0, elapsedSeconds: 1,
+      finalContent: 'Workspace is mounted read-only; unable to modify files.', stdout: '', stderr: '' }),
+    saveValidateImpl: async () => { restorations += 1; await restoreRepository(repoDir); return { tests: 0, typescript: 0, diffCheck: 0, changedFiles: 0 }; },
+  }), (error) => error.environment === true);
+  assert.equal(restorations, 1); assert.equal((await run('git', ['status', '--porcelain'], { cwd: repoDir })).stdout, '');
+  assert.equal(await readFile(path.join(repoDir, 'tracked.txt'), 'utf8'), 'initial');
+});
+
+test('la reprise rejoue un baseline moderne faussement réussi en read-only', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-readonly-resume-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const resultsDir = path.join(root, 'results');
+  const record = { id: '09-01-resume', legacyId: 'auto-resume', fingerprint: '9'.repeat(64), displayName: 'Reprise', promptBlock: 'Consigne' };
+  const paths = await initializeTestStorage(resultsDir, record); await writeFile(paths.caseFile, '# Cas\n');
+  await writeSavedRun(paths.base, { finalContent: 'Repository monté en lecture seule.', files: [] });
+  const labels = [];
+  await runOneTest({ repoDir: root, resultsDir }, record, {
+    assertSafeImpl: async () => {}, restoreImpl: async () => {},
+    runCodexImpl: async () => ({ success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'Terminé.', stdout: '', stderr: '' }),
+    saveValidateImpl: async ({ label }) => { labels.push(label); return { tests: 0, typescript: 0, diffCheck: 0, changedFiles: 1 }; },
+    compareImpl: async (_base, _prompt, output) => writeFile(output, 'diff'),
+  });
+  assert.deepEqual(labels, ['BASELINE', 'AVEC PROMPT']);
+});
+
 test('suite échouée retourne non-zéro après sauvegarde du résumé', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-suite-exit-')); t.after(() => rm(root, { recursive: true, force: true }));
   const prompt = { id: '01-01-x', displayName: 'X', relativePath: 'x.md', caseIndex: 1, fingerprint: 'f', legacyId: 'auto-f' };
@@ -302,6 +402,24 @@ test('suite propage interruption et panne infrastructure', async (t) => {
     const error = new Error('infrastructure'); error.infrastructure = true; throw error;
   } });
   assert.equal(infrastructure.exitCode, 2);
+});
+
+test('suite arrête les prompts suivants sur limitation d’écriture systémique', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-suite-readonly-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const prompts = [1, 2].map((index) => ({ id: `01-0${index}-x`, displayName: `X${index}`, relativePath: `x${index}.md`, caseIndex: 1, fingerprint: `f${index}`, legacyId: `auto-f${index}` }));
+  let calls = 0;
+  const result = await runSuite({ resultsDir: root }, { prepared: { prompts, selected: prompts }, runOneTestImpl: async () => {
+    calls += 1; const error = new Error('workspace read-only'); error.environment = true; throw error;
+  } });
+  assert.equal(calls, 1); assert.equal(result.exitCode, 2); assert.equal(result.summary[0].environment, true);
+});
+
+test('Docker monte le repo et les résultats en écriture, le playbook seul en lecture seule', async () => {
+  const compose = await readFile(path.resolve('compose.yaml'), 'utf8');
+  assert.match(compose, /^\s*- \.:\/workspace\/test-repo\s*$/m);
+  assert.match(compose, /^\s*- .*:\/workspace\/playbook:ro\s*$/m);
+  assert.match(compose, /^\s*- .*:\/workspace\/results\s*$/m);
+  assert.doesNotMatch(compose, /:\/workspace\/(?:test-repo|results):ro/);
 });
 
 test('un baseline réussi atteint AVEC PROMPT puis COMPARAISON', async (t) => {

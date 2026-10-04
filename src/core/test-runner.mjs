@@ -1,12 +1,15 @@
 import { cp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { formatElapsed, isInfrastructureFailure, isRateLimitFailure, runCodex } from './codex-process.mjs';
-import { getResumeState, initializeTestStorage, migrateLegacyGeneratedCase, readRunStatus } from './result-storage.mjs';
+import { getResumeState, initializeTestStorage, isEnvironmentWriteBlocked, migrateLegacyGeneratedCase, readRunStatus } from './result-storage.mjs';
 import { assertSafeRealRun, compareRuns, restoreRepository, saveAndValidateRun } from './validation.mjs';
 import { fail, ok, step, warn } from '../ui/console.mjs';
 
 export class CodexRunError extends Error {
-  constructor(message, result) { super(message); this.result = result; this.rateLimit = isRateLimitFailure(result); this.infrastructure = isInfrastructureFailure(result); }
+  constructor(message, result) {
+    super(message); this.result = result; this.rateLimit = isRateLimitFailure(result);
+    this.infrastructure = isInfrastructureFailure(result); this.environment = Boolean(result.environmentWriteBlocked);
+  }
 }
 
 function caseGenerationInput(test) {
@@ -29,8 +32,7 @@ async function executeRun({ config, runDir, label, input, runCodexImpl, saveVali
   } catch (error) {
     runError = error;
   }
-  if (result?.success) ok(`${label} terminé en ${formatElapsed(result.elapsedSeconds)}`);
-  else warn(`${label} en échec ; sauvegarde des preuves et restauration en cours`);
+  if (!result?.success) warn(`${label} en échec ; sauvegarde des preuves et restauration en cours`);
   step('VALIDATION');
   let validation;
   try {
@@ -40,11 +42,17 @@ async function executeRun({ config, runDir, label, input, runCodexImpl, saveVali
       `L’exécution Codex et la sauvegarde/validation ont échoué pendant ${label}.`);
     throw validationError;
   }
+  const writeBlocked = result && isEnvironmentWriteBlocked({ finalContent: result.finalContent,
+    stderr: result.stderr, stdout: result.stdout, inputContent: input }, validation.changedFiles);
+  if (writeBlocked) warn(`${label} invalide — workspace Codex en lecture seule${process.platform === 'win32' ? ' ; utilisez Docker/Linux si le sandbox Windows refuse encore l’écriture' : ''}`);
+  else if (result?.success) ok(`${label} terminé en ${formatElapsed(result.elapsedSeconds)}`);
   showValidation('Tests', validation.tests, validation.classifications?.tests);
   showValidation('TypeScript', validation.typescript, validation.classifications?.typescript);
   if (validation.diffCheck === 0) ok('git diff --check OK'); else fail(`git diff --check KO — code ${validation.diffCheck}`);
   ok('Dépôt restauré');
   if (runError) throw runError;
+  if (writeBlocked) throw new CodexRunError(`Workspace en lecture seule pendant ${label}.`,
+    { ...result, environmentWriteBlocked: true, functionalStatus: 'environment-limitation' });
   if (!result.success) throw new CodexRunError(`Codex a échoué pendant ${label} (code ${result.exitStatus}).`, result);
   const acceptable = (code, classification) => classification === 'environment-limitation'
     || (code === 0 && (classification === 'passed' || classification === undefined));

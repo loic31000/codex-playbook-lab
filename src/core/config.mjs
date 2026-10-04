@@ -36,6 +36,7 @@ export async function loadConfig(options = {}) {
       options.resultsDir ?? process.env.CODEX_LAB_RESULTS_DIR ?? '../codex-playbook-test-runs',
       repoDir,
     ),
+    benchmarksDir: raw.benchmarks_path ? resolvePortablePath(raw.benchmarks_path, repoDir) : null,
     casesPerPrompt,
   };
 }

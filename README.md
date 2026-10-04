@@ -93,7 +93,7 @@ Les chemins relatifs sont résolus depuis la racine du dépôt de test.
 
 Les cas générés sont créés à partir du prompt et servent à l’exploration ; ils peuvent varier entre deux générations. La commande `test` conserve ce fonctionnement et `cases_per_prompt` reste supporté.
 
-Les benchmarks fixes vivent dans `benchmarks/`. Ils sont versionnés, reproductibles et n’ajoutent aucun appel Codex pour générer le cas. Leur fingerprint dépend du fichier benchmark et du prompt testé. Une modification archive donc les anciens résultats selon les garde-fous existants, sans les supprimer.
+Les benchmarks fixes vivent dans `benchmarks/`. Ils sont versionnés, reproductibles et n’ajoutent aucun appel Codex pour générer le cas. Leur frontmatter reste conservé dans `case.md` comme métadonnée d’artefact, mais seul le corps Markdown est envoyé aux runs BASELINE et AVEC PROMPT. Leur fingerprint dépend du fichier benchmark et du prompt testé. Une modification archive donc les anciens résultats selon les garde-fous existants, sans les supprimer.
 
 Les trois premiers benchmarks ciblent `09-01-implementer-story` : ajout d’une tâche, ajout d’une priorité et liste des tâches. Le benchmark priorité attend une clarification sans modification, car les valeurs autorisées et la valeur par défaut constituent des décisions métier volontairement absentes. Ce résultat reste soumis à une appréciation humaine ; aucune notation automatique ni appel LLM juge n’est effectué.
 
@@ -103,7 +103,7 @@ Chaque test suit strictement : CAS → BASELINE → VALIDATION → AVEC PROMPT �
 
 Les runs Codex utilisent explicitement le sandbox `workspace-write`. Si Codex signale malgré cela que le workspace est en lecture seule et qu’aucune modification n’a été produite, le run est invalidé et sera rejoué lors d’une reprise. Sous Windows natif, Docker/Linux constitue la solution de repli si le sandbox refuse encore l’écriture.
 
-Chaque dossier lisible contient notamment `fingerprint.txt`, `case.md`, `generation.log`, `result.md`, `diff.patch`, `base/` et `prompt/`. Les sous-dossiers de run conservent l’entrée, la sortie finale, stdout, stderr, le log combiné, le statut structuré, le diff, les fichiers modifiés et les sorties de validation.
+Chaque dossier lisible contient notamment `fingerprint.txt`, `case.md`, `generation.log`, `result.md`, `diff.patch`, `base/` et `prompt/`. Les sous-dossiers de run conservent l’entrée, la sortie finale, stdout, stderr, le log combiné, le statut structuré, le diff, les fichiers modifiés et les sorties de validation. Leur `state-manifest.json` associe explicitement chaque chemin au statut `added`, `modified` ou `deleted` et au commit de référence commun utilisé pour reconstruire la comparaison A/B.
 
 `diff.patch` représente exclusivement la transformation **BASELINE → AVEC PROMPT**. Ses headers utilisent des chemins relatifs portables comme `a/src/task.ts` et `b/src/task.ts` ; il ne représente pas nécessairement une transformation de `HEAD` vers un résultat.
 

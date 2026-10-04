@@ -36,6 +36,47 @@ export async function restoreRepository(repoDir) {
   if (final.code !== 0 || final.stdout.trim()) throw new Error('Le repository n’est pas propre après restauration.');
 }
 
+function parseNameStatus(raw) {
+  const tokens = raw.split('\0').filter((value, index, all) => value || index < all.length - 1);
+  const changes = [];
+  for (let index = 0; index < tokens.length; index += 2) {
+    const code = tokens[index]; const file = tokens[index + 1];
+    if (!code || !file) throw new Error('Sortie Git name-status invalide.');
+    changes.push({ path: file, status: code.startsWith('A') ? 'added' : code.startsWith('D') ? 'deleted' : 'modified' });
+  }
+  return changes;
+}
+
+function safeSnapshotPath(root, relativePath) {
+  const target = path.resolve(root, ...relativePath.split('/'));
+  const relative = path.relative(path.resolve(root), target);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Chemin d’état invalide : ${relativePath}`);
+  }
+  return target;
+}
+
+export async function captureRunState(repoDir, runDir, baseCommit) {
+  const tracked = await git(['diff', '--name-status', '-z', '--no-renames', baseCommit], { cwd: repoDir });
+  const untracked = await git(['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoDir });
+  if (tracked.code !== 0 || untracked.code !== 0) throw new Error('Impossible de construire le manifest d’état Git.');
+  const byPath = new Map(parseNameStatus(tracked.stdout).map((entry) => [entry.path, entry]));
+  for (const file of untracked.stdout.split('\0').filter(Boolean)) byPath.set(file, { path: file, status: 'added' });
+  const files = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, 'en'));
+  const filesRoot = path.join(runDir, 'files'); await rm(filesRoot, { recursive: true, force: true }); await mkdir(filesRoot, { recursive: true });
+  for (const entry of files) {
+    if (entry.status === 'deleted') continue;
+    const source = safeSnapshotPath(repoDir, entry.path); const destination = safeSnapshotPath(filesRoot, entry.path);
+    await mkdir(path.dirname(destination), { recursive: true }); await cp(source, destination, { recursive: true });
+  }
+  const manifest = { version: 1, baseCommit, files };
+  await Promise.all([
+    writeFile(path.join(runDir, 'state-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
+    writeFile(path.join(runDir, 'files-list.txt'), `${files.map((entry) => entry.path).join('\n')}\n`, 'utf8'),
+  ]);
+  return manifest;
+}
+
 export async function saveAndValidateRun({ repoDir, runDir, label, restoreImpl = restoreRepository }) {
   let results = { tests: 1, typescript: 1, diffCheck: 1 };
   let workError = null;
@@ -53,19 +94,10 @@ export async function saveAndValidateRun({ repoDir, runDir, label, restoreImpl =
       writeFile(path.join(runDir, 'diff.patch'), diff.stdout, 'utf8'),
       writeFile(path.join(runDir, 'diff-stat.txt'), diffStat.stdout, 'utf8'),
     ]);
-    const tracked = await git(['diff', '--name-only', '-z'], { cwd: repoDir });
-    const untracked = await git(['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoDir });
-    const files = [...new Set(`${tracked.stdout}${untracked.stdout}`.split('\0').filter(Boolean))];
-    await writeFile(path.join(runDir, 'files-list.txt'), `${files.join('\n')}\n`, 'utf8');
-    const filesRoot = path.join(runDir, 'files'); await mkdir(filesRoot, { recursive: true });
-    for (const file of files) {
-      const source = path.join(repoDir, file); const destination = path.join(filesRoot, ...file.split('/'));
-      await mkdir(path.dirname(destination), { recursive: true });
-      try { await cp(source, destination, { recursive: true }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    }
+    const state = await captureRunState(repoDir, runDir, commit.stdout.trim());
     const tests = await capture('npm', ['test', '--', '--run'], repoDir, path.join(runDir, 'tests.txt'));
     const typescript = await capture('npx', ['tsc', '--noEmit'], repoDir, path.join(runDir, 'typescript.txt'));
-    results = { tests: tests.code ?? 1, typescript: typescript.code ?? 1, changedFiles: files.length,
+    results = { tests: tests.code ?? 1, typescript: typescript.code ?? 1, changedFiles: state.files.length,
       classifications: { tests: validationClassification(tests), typescript: validationClassification(typescript) } };
     const diffCheck = await git(['diff', '--check'], { cwd: repoDir });
     results.diffCheck = diffCheck.code ?? 1;
@@ -97,23 +129,83 @@ async function copySnapshot(source, destination) {
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 
-export async function compareRuns(baseDir, promptDir, outputFile, _repoDir) {
+async function readStateManifest(runDir) {
+  try {
+    const manifest = JSON.parse(await readFile(path.join(runDir, 'state-manifest.json'), 'utf8'));
+    if (manifest.version !== 1 || typeof manifest.baseCommit !== 'string' || !Array.isArray(manifest.files)) throw new Error('format invalide');
+    for (const entry of manifest.files) {
+      if (!entry || typeof entry.path !== 'string' || !['added', 'modified', 'deleted'].includes(entry.status)) throw new Error('entrée invalide');
+      safeSnapshotPath(runDir, entry.path);
+    }
+    return manifest;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`Manifest d’état invalide (${runDir}) : ${error.message}`);
+  }
+}
+
+async function materializeState(runDir, manifest, repoDir, paths, destination) {
+  const changes = new Map(manifest.files.map((entry) => [entry.path, entry]));
+  for (const relativePath of paths) {
+    const entry = changes.get(relativePath);
+    if (entry?.status === 'deleted') continue;
+    const source = entry ? safeSnapshotPath(path.join(runDir, 'files'), relativePath) : safeSnapshotPath(repoDir, relativePath);
+    const target = safeSnapshotPath(destination, relativePath);
+    try { await mkdir(path.dirname(target), { recursive: true }); await cp(source, target, { recursive: true }); }
+    catch (error) {
+      if (error.code === 'ENOENT' && !entry) continue;
+      throw new Error(`État de run incomplet pour ${relativePath} : ${error.message}`);
+    }
+  }
+}
+
+async function checkedGit(args, cwd, env) {
+  const result = await git(args, { cwd, env });
+  if (result.code !== 0) throw new Error(`Préparation de la comparaison impossible (${result.code ?? 'unknown'}) : ${result.stderr.trim()}`);
+  return result;
+}
+
+async function diffSnapshots(left, right, outputFile, env) {
   const worktree = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-diff-'));
   try {
-    await git(['init', '--quiet'], { cwd: worktree });
-    await copySnapshot(path.join(baseDir, 'files'), worktree);
-    await git(['add', '-A'], { cwd: worktree });
-    const commit = await git(['-c', 'user.name=Codex Lab', '-c', 'user.email=lab@example.invalid',
-      'commit', '--quiet', '--allow-empty', '-m', 'baseline'], { cwd: worktree });
-    if (commit.code !== 0) throw new Error(`Préparation de la comparaison impossible (${commit.code ?? 'unknown'}).`);
-    await git(['rm', '-r', '-f', '--quiet', '--ignore-unmatch', '.'], { cwd: worktree });
-    await copySnapshot(path.join(promptDir, 'files'), worktree);
-    await git(['add', '-A'], { cwd: worktree });
+    const gitDirectory = path.join(worktree, '.git'); await mkdir(gitDirectory);
+    const emptyGlobalConfig = path.join(gitDirectory, 'codex-empty-global'); await writeFile(emptyGlobalConfig, '', 'utf8');
+    const isolatedEnv = { ...env, GIT_CONFIG_GLOBAL: emptyGlobalConfig, GIT_CONFIG_NOSYSTEM: '1' };
+    await checkedGit(['init', '--quiet'], worktree, isolatedEnv);
+    const hooks = path.join(gitDirectory, 'codex-empty-hooks'); await mkdir(hooks);
+    await checkedGit(['config', '--local', 'core.autocrlf', 'false'], worktree, isolatedEnv);
+    await checkedGit(['config', '--local', 'commit.gpgSign', 'false'], worktree, isolatedEnv);
+    await checkedGit(['config', '--local', 'core.hooksPath', hooks], worktree, isolatedEnv);
+    await copySnapshot(left, worktree);
+    await checkedGit(['add', '-A'], worktree, isolatedEnv);
+    await checkedGit(['-c', 'commit.gpgSign=false', '-c', 'user.name=Codex Lab', '-c', 'user.email=lab@example.invalid',
+      'commit', '--quiet', '--allow-empty', '-m', 'baseline'], worktree, isolatedEnv);
+    await checkedGit(['rm', '-r', '-f', '--quiet', '--ignore-unmatch', '.'], worktree, isolatedEnv);
+    await copySnapshot(right, worktree);
+    await checkedGit(['add', '-A'], worktree, isolatedEnv);
     const result = await git(['diff', '--cached', '--exit-code', '--binary', '--text', '--find-renames',
-      '--src-prefix=a/', '--dst-prefix=b/'], { cwd: worktree });
+      '--src-prefix=a/', '--dst-prefix=b/'], { cwd: worktree, env: isolatedEnv });
     assertComparisonExitCode(result.code);
     await writeFile(outputFile, result.stdout || '(Aucune différence)\n', 'utf8');
   } finally {
     await rm(worktree, { recursive: true, force: true });
   }
+}
+
+export async function compareRuns(baseDir, promptDir, outputFile, repoDir, options = {}) {
+  const [baseState, promptState] = await Promise.all([readStateManifest(baseDir), readStateManifest(promptDir)]);
+  if (!baseState || !promptState) throw new Error('Comparaison impossible : manifest d\u2019\u00e9tat manquant pour un run.');
+  if (baseState.baseCommit !== promptState.baseCommit) throw new Error('Comparaison impossible : les runs ne partagent pas le même commit de base.');
+  const current = await git(['rev-parse', 'HEAD'], { cwd: repoDir, env: options.env });
+  if (current.code !== 0 || current.stdout.trim() !== baseState.baseCommit) {
+    throw new Error('Comparaison impossible : le repository n’est plus sur le commit de base des runs.');
+  }
+  const paths = [...new Set([...baseState.files, ...promptState.files].map((entry) => entry.path))].sort((a, b) => a.localeCompare(b, 'en'));
+  const states = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-states-'));
+  try {
+    const left = path.join(states, 'baseline'); const right = path.join(states, 'prompt'); await mkdir(left); await mkdir(right);
+    await materializeState(baseDir, baseState, repoDir, paths, left);
+    await materializeState(promptDir, promptState, repoDir, paths, right);
+    return await diffSnapshots(left, right, outputFile, options.env);
+  } finally { await rm(states, { recursive: true, force: true }); }
 }

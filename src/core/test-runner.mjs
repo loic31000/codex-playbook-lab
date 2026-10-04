@@ -113,7 +113,7 @@ export async function runOneTest(config, test, options = {}) {
     await rm(temporary, { recursive: true, force: true });
     ok(`Cas généré en ${formatElapsed(generated.elapsedSeconds)}`);
   }
-  const caseText = await readFile(paths.caseFile, 'utf8');
+  const caseText = test.kind === 'fixed-benchmark' ? test.executionText : await readFile(paths.caseFile, 'utf8');
 
   const baseStatus = await readRunStatus(paths.base);
   if (!baseStatus.valid) {

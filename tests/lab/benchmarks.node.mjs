@@ -20,7 +20,7 @@ async function fixture(t) {
 test('découverte benchmark, Markdown ordinaire ignoré et sélection sans hash', async (t) => {
   const { benchmarksDir } = await fixture(t);
   await writeFile(path.join(benchmarksDir, 'benchmark.md'), source());
-  await writeFile(path.join(benchmarksDir, 'notes.md'), '# Notes ordinaires\n');
+  await writeFile(path.join(benchmarksDir, 'notes.md'), '---\ntitle: Notes ordinaires\ntags:\n  - documentation\n---\n\n# Notes ordinaires\n');
   const records = await discoverBenchmarks(benchmarksDir, [prompt]);
   assert.equal(records.length, 1); assert.equal(records[0].kind, 'fixed-benchmark');
   assert.equal(records[0].id, '09-01-implementer-story--benchmark-001-test');
@@ -33,6 +33,8 @@ test('les trois benchmarks 09-01 versionnés sont découverts et déterministes'
   assert.deepEqual(records.map((item) => item.benchmarkId), ['001-ajouter-tache', '002-priorite-ambiguite', '003-lister-taches']);
   assert.deepEqual(records.map((item) => item.expectation), ['implementation', 'clarification', 'implementation']);
   assert.doesNotMatch(records[1].caseText, /\b(?:low|medium|high)\b/i);
+  assert.match(records[1].caseText, /expectation: clarification/);
+  assert.doesNotMatch(records[1].executionText, /format: codex-lab-benchmark|expectation: clarification/);
 });
 
 test('frontmatter benchmark invalide, expectation inconnue et prompt absent sont refusés avant exécution', async (t) => {
@@ -76,20 +78,31 @@ test('benchmark fixe charge case.md à l’identique sans appel de génération'
   assert.equal(result.status, 'completed'); assert.equal(calls.length, 2);
   assert.deepEqual(labels, ['BASELINE', 'AVEC PROMPT']);
   assert.equal(await readFile(result.paths.caseFile, 'utf8'), markdown);
+  for (const input of calls) {
+    assert.match(input, /# Cas stable/);
+    assert.doesNotMatch(input, /format: codex-lab-benchmark|expectation: implementation/);
+  }
   assert.match(await readFile(result.paths.result, 'utf8'), /Type : benchmark fixe[\s\S]*Attente : implementation/);
   assert.notEqual(record.id, prompt.id);
 });
 
 test('benchmark clarification accepte zéro modification sans masquer les erreurs techniques', async (t) => {
-  const { root, benchmarksDir } = await fixture(t); await writeFile(path.join(benchmarksDir, 'case.md'), source({ expectation: 'clarification' }));
-  const [record] = await discoverBenchmarks(benchmarksDir, [prompt]);
+  const { root } = await fixture(t);
+  const record = (await discoverBenchmarks(path.resolve('benchmarks'), [prompt]))
+    .find((item) => item.benchmarkId === '002-priorite-ambiguite');
+  const calls = [];
   const result = await runOneTest({ repoDir: root, resultsDir: path.join(root, 'results') }, record, {
     assertSafeImpl: async () => {}, restoreImpl: async () => {},
-    runCodexImpl: async ({ outputDir }) => { await mkdir(outputDir, { recursive: true }); return { success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'Les valeurs métier manquent. Quelles valeurs souhaitez-vous ?', stdout: '', stderr: '' }; },
+    runCodexImpl: async ({ input, outputDir }) => { calls.push(input); await mkdir(outputDir, { recursive: true }); return { success: true, exitStatus: 0, elapsedSeconds: 1, finalContent: 'Les valeurs métier manquent. Quelles valeurs souhaitez-vous ?', stdout: '', stderr: '' }; },
     saveValidateImpl: async () => ({ tests: 0, typescript: 0, diffCheck: 0, changedFiles: 0 }),
     compareImpl: async (_a, _b, output) => writeFile(output, '(Aucune différence)\n'),
   });
   assert.equal(result.status, 'completed');
+  assert.equal(calls.length, 2);
+  for (const input of calls) {
+    assert.match(input, /priorit/i);
+    assert.doesNotMatch(input, /format: codex-lab-benchmark|expectation: clarification/);
+  }
   const readOnly = new CodexRunError('x', { success: true, stderr: '', environmentWriteBlocked: true });
   const rateLimit = new CodexRunError('x', { success: false, stderr: 'HTTP 429 too many requests' });
   const interrupted = new CodexRunError('x', { success: false, stderr: '', interrupted: true, interruptionSignal: 'SIGINT' });

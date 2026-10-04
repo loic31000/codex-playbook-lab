@@ -12,6 +12,8 @@ function parseFrontmatter(markdown, sourcePath) {
     if (/format\s*:\s*codex-lab-benchmark/i.test(markdown)) throw new Error(`Frontmatter benchmark invalide : ${sourcePath}`);
     return null;
   }
+  const format = match[1].match(/^format\s*:\s*(.*?)\s*$/im)?.[1];
+  if (format !== 'codex-lab-benchmark') return null;
   const fields = {};
   for (const line of match[1].split(/\r?\n/)) {
     if (!line.trim() || line.trimStart().startsWith('#')) continue;
@@ -67,7 +69,7 @@ export async function discoverBenchmarks(benchmarksDir, prompts) {
     records.push({ ...prompt, kind: 'fixed-benchmark', benchmarkId, promptId,
       id: `${promptId}--benchmark-${benchmarkId}`, legacyId: `benchmark-${fingerprint.slice(0, 12)}`,
       displayName: `${promptId} / Benchmark ${benchmarkId.match(/^\d+/)?.[0] ?? benchmarkId} - ${title.trim()}`,
-      caseText: markdown, expectation, sourcePath, benchmarkSource: fullPath, fingerprint });
+      caseText: markdown, executionText: parsed.body, expectation, sourcePath, benchmarkSource: fullPath, fingerprint });
   }
   return records;
 }

@@ -1,0 +1,13 @@
+[project]
+name = "codex-playbook-lab-inspect-spike"
+version = "0.1.0"
+description = "Minimal Inspect AI + inspect-swe + Codex CLI infrastructure spike"
+requires-python = ">=3.11"
+dependencies = [
+  "inspect-ai==0.3.276",
+  "inspect-swe==0.2.71",
+  "openai==3.1.0",
+]
+
+[tool.uv]
+package = false

@@ -1,3 +1,8 @@
 node_modules/
 dist/
 coverage/
+spikes/inspect-codex/logs/
+spikes/inspect-codex/.pytest_cache/
+spikes/inspect-codex/.venv/
+spikes/inspect-codex/__pycache__/
+spikes/inspect-codex/tests/__pycache__/

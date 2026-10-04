@@ -32,9 +32,13 @@ test('les trois benchmarks 09-01 versionnés sont découverts et déterministes'
   const records = await discoverBenchmarks(path.resolve('benchmarks'), [prompt]);
   assert.deepEqual(records.map((item) => item.benchmarkId), ['001-ajouter-tache', '002-priorite-ambiguite', '003-lister-taches']);
   assert.deepEqual(records.map((item) => item.expectation), ['implementation', 'clarification', 'implementation']);
-  assert.doesNotMatch(records[1].caseText, /\b(?:low|medium|high)\b/i);
-  assert.match(records[1].caseText, /expectation: clarification/);
-  assert.doesNotMatch(records[1].executionText, /format: codex-lab-benchmark|expectation: clarification/);
+  const ambiguity = records[1];
+  assert.match(ambiguity.caseText, /expectation: clarification/);
+  assert.match(ambiguity.executionText, /attribuer une priorité à une tâche/i);
+  assert.match(ambiguity.executionText, /si aucune priorité n['’]est fournie[^;\n]*priorité par défaut/i);
+  assert.doesNotMatch(ambiguity.executionText, /format: codex-lab-benchmark|expectation: clarification/);
+  assert.doesNotMatch(ambiguity.executionText, /\b(?:low|medium|high)\b/i);
+  assert.doesNotMatch(ambiguity.executionText, /ne sont pas définies|non définies|information manquante|ambiguïté|clarification nécessaire/i);
 });
 
 test('frontmatter benchmark invalide, expectation inconnue et prompt absent sont refusés avant exécution', async (t) => {

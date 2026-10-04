@@ -23,8 +23,6 @@ afin d’identifier rapidement les tâches importantes.
 - la priorité est retournée avec la tâche créée ;
 - la fonctionnalité est couverte par des tests automatisés.
 
-Les valeurs de priorité autorisées et la priorité par défaut ne sont pas définies dans cette Story.
-
 ## Hors périmètre
 
 - persistance ;

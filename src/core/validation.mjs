@@ -8,9 +8,9 @@ async function capture(command, args, cwd, outputFile) {
   return result;
 }
 
-function validationClassification(result) {
+export function validationClassification(result) {
   if (result.code === 0) return 'passed';
-  return /(EPERM|EACCES|access (?:is )?denied|permission denied|operation not permitted|sandbox)/i.test(`${result.stdout}\n${result.stderr}`)
+  return /(EPERM|EACCES|access (?:is )?denied|permission denied|operation not permitted)/i.test(`${result.stdout}\n${result.stderr}`)
     ? 'environment-limitation' : 'failed';
 }
 
@@ -52,9 +52,9 @@ export async function saveAndValidateRun({ repoDir, runDir, label, restoreImpl =
       writeFile(path.join(runDir, 'diff.patch'), diff.stdout, 'utf8'),
       writeFile(path.join(runDir, 'diff-stat.txt'), diffStat.stdout, 'utf8'),
     ]);
-    const tracked = await git(['diff', '--name-only'], { cwd: repoDir });
-    const untracked = await git(['ls-files', '--others', '--exclude-standard'], { cwd: repoDir });
-    const files = [...new Set(`${tracked.stdout}\n${untracked.stdout}`.split(/\r?\n/).filter(Boolean))];
+    const tracked = await git(['diff', '--name-only', '-z'], { cwd: repoDir });
+    const untracked = await git(['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoDir });
+    const files = [...new Set(`${tracked.stdout}${untracked.stdout}`.split('\0').filter(Boolean))];
     await writeFile(path.join(runDir, 'files-list.txt'), `${files.join('\n')}\n`, 'utf8');
     const filesRoot = path.join(runDir, 'files'); await mkdir(filesRoot, { recursive: true });
     for (const file of files) {

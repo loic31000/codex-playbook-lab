@@ -23,15 +23,28 @@ function promptedInput(caseText, promptBlock) {
 
 async function executeRun({ config, runDir, label, input, runCodexImpl, saveValidateImpl }) {
   step(label, 'Exécution Codex...');
-  const result = await runCodexImpl({ input, outputDir: runDir, cwd: config.repoDir, activity: `${label} — Codex travaille toujours...` });
-  if (result.success) ok(`${label} terminé en ${formatElapsed(result.elapsedSeconds)}`);
+  let result; let runError = null;
+  try {
+    result = await runCodexImpl({ input, outputDir: runDir, cwd: config.repoDir, activity: `${label} — Codex travaille toujours...` });
+  } catch (error) {
+    runError = error;
+  }
+  if (result?.success) ok(`${label} terminé en ${formatElapsed(result.elapsedSeconds)}`);
   else warn(`${label} en échec ; sauvegarde des preuves et restauration en cours`);
   step('VALIDATION');
-  const validation = await saveValidateImpl({ repoDir: config.repoDir, runDir, label });
+  let validation;
+  try {
+    validation = await saveValidateImpl({ repoDir: config.repoDir, runDir, label });
+  } catch (validationError) {
+    if (runError) throw new AggregateError([runError, validationError],
+      `L’exécution Codex et la sauvegarde/validation ont échoué pendant ${label}.`);
+    throw validationError;
+  }
   showValidation('Tests', validation.tests, validation.classifications?.tests);
   showValidation('TypeScript', validation.typescript, validation.classifications?.typescript);
   if (validation.diffCheck === 0) ok('git diff --check OK'); else fail(`git diff --check KO — code ${validation.diffCheck}`);
   ok('Dépôt restauré');
+  if (runError) throw runError;
   if (!result.success) throw new CodexRunError(`Codex a échoué pendant ${label} (code ${result.exitStatus}).`, result);
   const acceptable = (code, classification) => classification === 'environment-limitation'
     || (code === 0 && (classification === 'passed' || classification === undefined));
@@ -63,9 +76,21 @@ export async function runOneTest(config, test, options = {}) {
   if (!state.caseReady) {
     step('CAS');
     const temporary = path.join(paths.root, '.generation');
-    const generated = await runCodexImpl({ input: caseGenerationInput(test), outputDir: temporary, cwd: config.repoDir, activity: 'Codex génère le cas...' });
-    await cp(path.join(temporary, 'codex-log.txt'), paths.generationLog);
-    await restoreImpl(config.repoDir);
+    let generated; let generationError = null;
+    try {
+      generated = await runCodexImpl({ input: caseGenerationInput(test), outputDir: temporary, cwd: config.repoDir, activity: 'Codex génère le cas...' });
+      await cp(path.join(temporary, 'codex-log.txt'), paths.generationLog);
+    } catch (error) {
+      generationError = error;
+    }
+    try {
+      await restoreImpl(config.repoDir);
+    } catch (restorationError) {
+      if (generationError) throw new AggregateError([generationError, restorationError],
+        'La génération du cas et la restauration du dépôt ont échoué.');
+      throw restorationError;
+    }
+    if (generationError) throw generationError;
     if (!generated.success || !generated.finalContent?.trim()) throw new CodexRunError('Génération du cas impossible.', generated);
     await writeFile(paths.caseFile, `${generated.finalContent.trim()}\n`, 'utf8');
     await rm(temporary, { recursive: true, force: true });

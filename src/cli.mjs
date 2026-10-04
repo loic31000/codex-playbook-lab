@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { discoverPrompts } from './core/prompt-discovery.mjs';
 import { saveAndValidateRun } from './core/validation.mjs';
 import { legacyRunTestCommand } from './commands/legacy-run-test.mjs';
+import { safeResultDirectory } from './core/result-storage.mjs';
 
 function parse(argv) {
   const positional = []; const options = {};
@@ -51,7 +52,10 @@ export async function main(argv = process.argv.slice(2)) {
     prompts.forEach((p) => console.log(`${p.id}\t${p.relativePath}`)); return 0;
   }
   if (command === 'run-test') return legacyRunTestCommand(config, options);
-  if (command === 'save-run') { await saveAndValidateRun({ repoDir: config.repoDir, runDir: path.join(config.resultsDir, options.name), label: options.name }); return 0; }
+  if (command === 'save-run') {
+    const runDir = safeResultDirectory(config.resultsDir, options.name);
+    await saveAndValidateRun({ repoDir: config.repoDir, runDir, label: options.name }); return 0;
+  }
   throw new Error(`Commande inconnue : ${command ?? '(vide)'}`);
 }
 

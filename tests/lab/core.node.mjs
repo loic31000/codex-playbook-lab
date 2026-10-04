@@ -6,11 +6,11 @@ import path from 'node:path';
 import { fingerprintPrompt, slugify } from '../../src/core/fingerprints.mjs';
 import { extractPromptBlock, hasPromptFrontmatter, selectPrompt } from '../../src/core/prompt-discovery.mjs';
 import { activeCodexCount, evaluateExit, formatElapsed, isRateLimitFailure, resolveCodexCommand, runCodex, runCodexVersion } from '../../src/core/codex-process.mjs';
-import { cleanResultsSafely, getResumeState, initializeTestStorage, migrateLegacyGeneratedCase, readRunStatus } from '../../src/core/result-storage.mjs';
+import { cleanResultsSafely, getResumeState, initializeTestStorage, migrateLegacyGeneratedCase, readRunStatus, safeResultDirectory } from '../../src/core/result-storage.mjs';
 import { loadConfig, resolvePortablePath } from '../../src/core/config.mjs';
 import { runOneTest, showValidation } from '../../src/core/test-runner.mjs';
 import { run } from '../../src/core/process.mjs';
-import { assertSafeRealRun, saveAndValidateRun } from '../../src/core/validation.mjs';
+import { assertSafeRealRun, saveAndValidateRun, validationClassification } from '../../src/core/validation.mjs';
 import { runSuite } from '../../src/core/suite-runner.mjs';
 
 async function writeSavedRun(directory, { exit = '0', modern = true, tests = 'passed', typescript = 'passed', diffCheck = 0, fallback = false } = {}) {
@@ -125,6 +125,25 @@ test('nettoyage refuse une cible différente de la destination configurée', asy
   await assert.rejects(cleanResultsSafely(root, root, [path.join(root, 'repo')]));
 });
 
+test('chemins de résultats refusent toute sortie du dossier configuré', () => {
+  const root = path.resolve('results');
+  assert.equal(safeResultDirectory(root, '..safe'), path.join(root, '..safe'));
+  for (const name of ['', '.', '..', '../outside', '..\\outside', 'nested/run']) {
+    assert.throws(() => safeResultDirectory(root, name), /invalide|hors/);
+  }
+});
+
+test('nettoyage refuse aussi une cible située dans un dossier protégé', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-clean-nested-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const results = path.join(root, 'repo', 'results'); await mkdir(results, { recursive: true });
+  await assert.rejects(cleanResultsSafely(results, results, [path.join(root, 'repo')]), /chevauche/);
+});
+
+test('le mot sandbox seul ne masque pas un véritable échec', () => {
+  assert.equal(validationClassification({ code: 1, stdout: 'sandbox behavior failed', stderr: '' }), 'failed');
+  assert.equal(validationClassification({ code: 1, stdout: '', stderr: 'operation not permitted (EPERM)' }), 'environment-limitation');
+});
+
 test('configuration et sélection mono-prompt', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-config-')); t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'suite.json'), JSON.stringify({ playbook_path: '../pb', cases_per_prompt: 2 }));
@@ -233,6 +252,32 @@ test('double échec conserve validation et restauration', async (t) => {
     assert.ok(error instanceof AggregateError); assert.equal(error.errors.length, 2);
     assert.match(error.message, /validation.*restauration/); return true;
   });
+});
+
+test('une exception pendant la génération restaure quand même le dépôt', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-generation-restore-')); t.after(() => rm(root, { recursive: true, force: true }));
+  let restorations = 0;
+  const testRecord = { id: '01-01-generation', legacyId: 'auto-generation', fingerprint: 'c'.repeat(64), displayName: 'Génération', promptBlock: 'Consigne' };
+  await assert.rejects(runOneTest({ repoDir: root, resultsDir: path.join(root, 'results') }, testRecord, {
+    assertSafeImpl: async () => {},
+    runCodexImpl: async () => { throw new Error('lancement impossible'); },
+    restoreImpl: async () => { restorations += 1; },
+  }), /lancement impossible/);
+  assert.equal(restorations, 1);
+});
+
+test('une exception Codex pendant un run passe encore par validation/restauration', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-run-restore-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const resultsDir = path.join(root, 'results');
+  const testRecord = { id: '01-01-run', legacyId: 'auto-run', fingerprint: 'd'.repeat(64), displayName: 'Run', promptBlock: 'Consigne' };
+  const paths = await initializeTestStorage(resultsDir, testRecord); await writeFile(paths.caseFile, '# Cas\n');
+  let validations = 0;
+  await assert.rejects(runOneTest({ repoDir: root, resultsDir }, testRecord, {
+    assertSafeImpl: async () => {},
+    runCodexImpl: async () => { throw new Error('processus interrompu'); },
+    saveValidateImpl: async () => { validations += 1; return { tests: 0, typescript: 0, diffCheck: 0 }; },
+  }), /processus interrompu/);
+  assert.equal(validations, 1);
 });
 
 test('suite échouée retourne non-zéro après sauvegarde du résumé', async (t) => {

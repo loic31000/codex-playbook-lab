@@ -3,8 +3,26 @@ import path from 'node:path';
 
 async function exists(target) { try { await stat(target); return true; } catch { return false; } }
 
+function isSameOrWithin(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+export function safeResultDirectory(resultsDir, name) {
+  if (typeof name !== 'string' || !name.trim() || name === '.' || name === '..' || /[\\/]/.test(name)) {
+    throw new Error(`Nom de dossier de résultat invalide : ${name ?? '(vide)'}`);
+  }
+  const root = path.resolve(resultsDir);
+  const target = path.resolve(root, name);
+  const relative = path.relative(root, target);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Dossier de résultat hors de la destination configurée : ${name}`);
+  }
+  return target;
+}
+
 export function testPaths(resultsDir, test) {
-  const root = path.join(resultsDir, test.id);
+  const root = safeResultDirectory(resultsDir, test.id);
   return { root, fingerprint: path.join(root, 'fingerprint.txt'), caseFile: path.join(root, 'case.md'), generationLog: path.join(root, 'generation.log'), result: path.join(root, 'result.md'), comparison: path.join(root, 'diff.patch'), base: path.join(root, 'base'), prompt: path.join(root, 'prompt') };
 }
 
@@ -58,7 +76,7 @@ async function uniqueArchivePath(resultsDir, name) {
 export async function initializeTestStorage(resultsDir, test) {
   await mkdir(resultsDir, { recursive: true });
   const paths = testPaths(resultsDir, test);
-  const legacy = path.join(resultsDir, test.legacyId);
+  const legacy = safeResultDirectory(resultsDir, test.legacyId);
   let recognizedLegacyMigration = false;
   if (!(await exists(paths.root)) && await exists(legacy)) {
     await rename(legacy, paths.root); recognizedLegacyMigration = true;
@@ -120,9 +138,8 @@ export async function cleanResultsSafely(resultsDir, configuredResultsDir, prote
   const target = path.resolve(resultsDir); const configured = path.resolve(configuredResultsDir);
   if (target !== configured || path.parse(target).root === target) throw new Error('Nettoyage refusé : destination non configurée ou trop large.');
   for (const protectedDir of protectedDirs.map((x) => path.resolve(x))) {
-    const relative = path.relative(target, protectedDir);
-    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
-      throw new Error(`Nettoyage refusé : la cible contient un dossier protégé (${protectedDir}).`);
+    if (isSameOrWithin(target, protectedDir) || isSameOrWithin(protectedDir, target)) {
+      throw new Error(`Nettoyage refusé : la cible chevauche un dossier protégé (${protectedDir}).`);
     }
   }
   await rm(target, { recursive: true, force: true });

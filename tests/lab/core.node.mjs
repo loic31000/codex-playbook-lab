@@ -160,7 +160,7 @@ test('configuration et sélection mono-prompt', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-config-')); t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'suite.json'), JSON.stringify({ playbook_path: '../pb', cases_per_prompt: 2 }));
   const config = await loadConfig({ repoDir: root, configPath: 'suite.json', resultsDir: '../out' });
-  assert.equal(config.casesPerPrompt, 2); assert.equal(config.playbookDir, path.resolve(root, '../pb'));
+  assert.equal(config.casesPerPrompt, 2); assert.equal(config.playbookDir, path.resolve(root, '../pb')); assert.equal(config.benchmarksDir, null);
   const prompts = [{ id: '01-01-alpha', relativePath: '01/a.md', fullPath: path.join(root, 'a.md') }, { id: '01-02-beta', relativePath: '01/b.md', fullPath: path.join(root, 'b.md') }];
   assert.equal(selectPrompt(prompts, '01-02-beta').relativePath, '01/b.md');
   assert.throws(() => selectPrompt(prompts, '01'));

@@ -14,10 +14,15 @@ export async function prepareSuite(config, selector) {
 export async function runSuite(config, { selector, prepared, runOneTestImpl = runOneTest } = {}) {
   await ensureResultsWritable(config.resultsDir);
   const { prompts, selected } = prepared ?? await prepareSuite(config, selector);
-  const manifest = prompts.map(({ id, displayName, relativePath, caseIndex, fingerprint, legacyId }) => ({
-    id, fingerprint, prompt: relativePath, folder: id, case: `${id}/case.md`, case_index: caseIndex,
-    display_name: displayName, legacy_id: legacyId,
-  }));
+  const manifest = prompts.map((test) => test.kind === 'fixed-benchmark' ? {
+    kind: 'fixed-benchmark', id: test.id, fingerprint: test.fingerprint, prompt: test.promptId,
+    benchmark: test.benchmarkId, expectation: test.expectation, source: test.sourcePath,
+    folder: test.id, case: `${test.id}/case.md`, display_name: test.displayName,
+  } : {
+    kind: 'generated', id: test.id, fingerprint: test.fingerprint, prompt: test.relativePath,
+    folder: test.id, case: `${test.id}/case.md`, case_index: test.caseIndex,
+    display_name: test.displayName, legacy_id: test.legacyId,
+  });
   await writeFile(path.join(config.resultsDir, 'generated-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   const summary = [];
   for (let index = 0; index < selected.length; index += 1) {

@@ -14,6 +14,7 @@ import { discoverPrompts } from './core/prompt-discovery.mjs';
 import { saveAndValidateRun } from './core/validation.mjs';
 import { legacyRunTestCommand } from './commands/legacy-run-test.mjs';
 import { safeResultDirectory } from './core/result-storage.mjs';
+import { benchmarkCommand } from './commands/benchmark.mjs';
 
 function parse(argv) {
   const positional = []; const options = {};
@@ -44,6 +45,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'check') return checkCommand(config, options);
   if (command === 'suite') return suiteCommand(config, options);
   if (command === 'test') return testCommand(config, { ...options, selector });
+  if (command === 'benchmark') return benchmarkCommand(config, { ...options, selector });
   if (command === 'resume') return resumeCommand(config);
   if (command === 'results') return resultsCommand(config);
   if (command === 'clean') return cleanCommand(config, options);

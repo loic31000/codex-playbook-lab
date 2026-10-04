@@ -24,7 +24,7 @@ function promptedInput(caseText, promptBlock) {
   return `${promptBlock}\n\nContrainte d'environnement : sous Windows PowerShell 5.1, si tu lis un fichier texte, lis-le explicitement en UTF-8 afin de préserver les accents.\nN’exécute des tests, builds ou outils de validation que s’ils sont pertinents pour la tâche.\nSi une commande échoue uniquement avec EPERM, Access denied ou une restriction du sandbox, traite cela comme une limitation d’environnement et non comme un défaut du repository.\n\nCas de test à traiter :\n\n${caseText}\n`;
 }
 
-async function executeRun({ config, runDir, label, input, runCodexImpl, saveValidateImpl }) {
+async function executeRun({ config, runDir, label, input, expectation, runCodexImpl, saveValidateImpl }) {
   step(label, 'Exécution Codex...');
   let result; let runError = null;
   try {
@@ -46,6 +46,9 @@ async function executeRun({ config, runDir, label, input, runCodexImpl, saveVali
     stderr: result.stderr, stdout: result.stdout, inputContent: input }, validation.changedFiles);
   if (writeBlocked) warn(`${label} invalide — workspace Codex en lecture seule${process.platform === 'win32' ? ' ; utilisez Docker/Linux si le sandbox Windows refuse encore l’écriture' : ''}`);
   else if (result?.success) ok(`${label} terminé en ${formatElapsed(result.elapsedSeconds)}`);
+  if (!writeBlocked && result?.success && validation.changedFiles === 0 && expectation === 'implementation') {
+    warn(`${label} terminé sans modification — résultat d’implémentation à examiner`);
+  }
   showValidation('Tests', validation.tests, validation.classifications?.tests);
   showValidation('TypeScript', validation.typescript, validation.classifications?.typescript);
   if (validation.diffCheck === 0) ok('git diff --check OK'); else fail(`git diff --check KO — code ${validation.diffCheck}`);
@@ -76,12 +79,18 @@ export async function runOneTest(config, test, options = {}) {
   const compareImpl = options.compareImpl ?? compareRuns;
   const restoreImpl = options.restoreImpl ?? restoreRepository;
   const paths = await initializeTestStorage(config.resultsDir, test);
-  await migrateLegacyGeneratedCase(config.resultsDir, test, paths);
+  if (test.kind === 'fixed-benchmark') {
+    let storedCase = null;
+    try { storedCase = await readFile(paths.caseFile, 'utf8'); } catch {}
+    if (storedCase !== test.caseText) await writeFile(paths.caseFile, test.caseText, 'utf8');
+  } else await migrateLegacyGeneratedCase(config.resultsDir, test, paths);
   let state = await getResumeState(paths);
   if (state.complete) { ok(`${test.id} déjà terminé`); return { status: 'skipped', paths }; }
   await assertSafeImpl(config.repoDir);
 
-  if (!state.caseReady) {
+  if (test.kind === 'fixed-benchmark') {
+    step('CAS'); ok(`Benchmark fixe chargé : ${test.sourcePath}`);
+  } else if (!state.caseReady) {
     step('CAS');
     const temporary = path.join(paths.root, '.generation');
     let generated; let generationError = null;
@@ -109,19 +118,21 @@ export async function runOneTest(config, test, options = {}) {
   const baseStatus = await readRunStatus(paths.base);
   if (!baseStatus.valid) {
     if (baseStatus.reason !== 'missing') await rm(paths.base, { recursive: true, force: true });
-    await executeRun({ config, runDir: paths.base, label: 'BASELINE', input: baselineInput(caseText), runCodexImpl, saveValidateImpl });
+    await executeRun({ config, runDir: paths.base, label: 'BASELINE', input: baselineInput(caseText), expectation: test.expectation, runCodexImpl, saveValidateImpl });
   } else warn('Baseline valide réutilisé');
 
   const promptStatus = await readRunStatus(paths.prompt);
   if (!promptStatus.valid) {
     if (promptStatus.reason !== 'missing') await rm(paths.prompt, { recursive: true, force: true });
-    await executeRun({ config, runDir: paths.prompt, label: 'AVEC PROMPT', input: promptedInput(caseText, test.promptBlock), runCodexImpl, saveValidateImpl });
+    await executeRun({ config, runDir: paths.prompt, label: 'AVEC PROMPT', input: promptedInput(caseText, test.promptBlock), expectation: test.expectation, runCodexImpl, saveValidateImpl });
   } else warn('Run avec prompt valide réutilisé');
 
   step('COMPARAISON');
   await compareImpl(paths.base, paths.prompt, paths.comparison, config.repoDir);
   const finalState = await getResumeState(paths);
-  const resultText = `# ${test.displayName}\n\n- Baseline : valide\n- Avec prompt : valide\n- Comparaison : ${finalState.comparison ? 'créée' : 'absente'}\n`;
+  const benchmarkMetadata = test.kind === 'fixed-benchmark'
+    ? `- Type : benchmark fixe\n- Attente : ${test.expectation}\n` : '';
+  const resultText = `# ${test.displayName}\n\n${benchmarkMetadata}- Baseline : valide\n- Avec prompt : valide\n- Comparaison : ${finalState.comparison ? 'créée' : 'absente'}\n`;
   await writeFile(paths.result, resultText, 'utf8');
   ok('Comparaison créée'); ok('Test terminé');
   return { status: 'completed', paths };

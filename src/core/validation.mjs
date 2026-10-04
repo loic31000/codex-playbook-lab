@@ -1,4 +1,5 @@
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { git, run } from './process.mjs';
 
@@ -84,8 +85,35 @@ export async function saveAndValidateRun({ repoDir, runDir, label, restoreImpl =
   return results;
 }
 
-export async function compareRuns(baseDir, promptDir, outputFile, repoDir) {
-  const result = await git(['diff', '--no-index', '--text', path.join(baseDir, 'files'), path.join(promptDir, 'files')], { cwd: repoDir });
-  if (![0, 1].includes(result.code)) throw new Error(`Comparaison impossible (${result.code ?? 'unknown'}).`);
-  await writeFile(outputFile, result.stdout || '(Aucune différence)\n', 'utf8');
+export function assertComparisonExitCode(code) {
+  if (![0, 1].includes(code)) throw new Error(`Comparaison impossible (${code ?? 'unknown'}).`);
+}
+
+async function copySnapshot(source, destination) {
+  try {
+    for (const entry of await readdir(source, { withFileTypes: true })) {
+      await cp(path.join(source, entry.name), path.join(destination, entry.name), { recursive: true });
+    }
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+
+export async function compareRuns(baseDir, promptDir, outputFile, _repoDir) {
+  const worktree = await mkdtemp(path.join(os.tmpdir(), 'codex-lab-diff-'));
+  try {
+    await git(['init', '--quiet'], { cwd: worktree });
+    await copySnapshot(path.join(baseDir, 'files'), worktree);
+    await git(['add', '-A'], { cwd: worktree });
+    const commit = await git(['-c', 'user.name=Codex Lab', '-c', 'user.email=lab@example.invalid',
+      'commit', '--quiet', '--allow-empty', '-m', 'baseline'], { cwd: worktree });
+    if (commit.code !== 0) throw new Error(`Préparation de la comparaison impossible (${commit.code ?? 'unknown'}).`);
+    await git(['rm', '-r', '-f', '--quiet', '--ignore-unmatch', '.'], { cwd: worktree });
+    await copySnapshot(path.join(promptDir, 'files'), worktree);
+    await git(['add', '-A'], { cwd: worktree });
+    const result = await git(['diff', '--cached', '--exit-code', '--binary', '--text', '--find-renames',
+      '--src-prefix=a/', '--dst-prefix=b/'], { cwd: worktree });
+    assertComparisonExitCode(result.code);
+    await writeFile(outputFile, result.stdout || '(Aucune différence)\n', 'utf8');
+  } finally {
+    await rm(worktree, { recursive: true, force: true });
+  }
 }

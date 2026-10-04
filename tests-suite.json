@@ -1,4 +1,5 @@
 {
   "playbook_path": "../codex-engineering-playbook-fr",
-  "cases_per_prompt": 1
+  "cases_per_prompt": 1,
+  "benchmarks_path": "benchmarks"
 }

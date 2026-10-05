@@ -34,9 +34,31 @@ export class AppServerClient {
     });
   }
 
-  static async start({ accessToken, codexHome, command = 'codex' }) {
+  static async start({ accessToken, codexHome, command = 'codex', environments = [] }) {
     if (!(accessToken instanceof SensitiveValue)) throw new Error('accessToken doit être encapsulé');
     await fs.mkdir(codexHome, { recursive: true });
+    if (environments.length) {
+      const quote = (value) => JSON.stringify(value);
+      const definitions = environments.map((environment) => {
+        if (!environment?.id || !environment?.program || !Array.isArray(environment?.args)) {
+          throw new Error('Définition d’environnement exec-server invalide');
+        }
+        return [
+          '[[environments]]',
+          `id = ${quote(environment.id)}`,
+          `program = ${quote(environment.program)}`,
+          `args = [${environment.args.map(quote).join(', ')}]`,
+        ].join('\n');
+      });
+      const config = [
+        `default = ${quote(environments[0].id)}`,
+        'include_local = false',
+        '',
+        ...definitions,
+        '',
+      ].join('\n');
+      await fs.writeFile(path.join(codexHome, 'environments.toml'), config, 'utf8');
+    }
     const args = [
       'app-server', '--listen', 'stdio://', '--enable', 'deferred_executor',
       '-c', 'model_provider="openai_chatgpt_plan"',
@@ -150,6 +172,10 @@ export class AppServerClient {
     });
     const info = await this.request('environment/info', { environmentId });
     return info;
+  }
+
+  environmentInfo(environmentId = ENVIRONMENT_ID) {
+    return this.request('environment/info', { environmentId }, 60_000);
   }
 
   async startThread({ model, cwd = '/workspace', developerInstructions = null, environmentId = ENVIRONMENT_ID }) {

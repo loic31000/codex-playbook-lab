@@ -14,13 +14,11 @@ fi
 
 mkdir -p "${CODEX_HOME:-/tmp/codex-home}"
 
-if [ "$#" -ne 1 ]; then
-  echo "expected exec-server capability-token SHA-256" >&2
+if [ "$#" -ne 1 ] || [ "$1" != "stdio" ]; then
+  echo "expected isolated stdio mode" >&2
   exit 64
 fi
 
 exec codex exec-server \
-  --listen ws://0.0.0.0:4500 \
-  --ws-auth capability-token \
-  --ws-token-sha256 "$1" \
+  --listen stdio \
   --linux-sandbox-pid-namespace isolate

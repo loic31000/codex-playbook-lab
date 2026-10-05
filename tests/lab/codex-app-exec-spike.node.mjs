@@ -19,8 +19,9 @@ import {
   cleanupEnvironment,
   collectContainerFacts,
   dockerExec,
+  environmentDefinition,
+  provisionEnvironment,
   startEnvironment,
-  unauthenticatedWebSocketRejected,
 } from '../../spikes/codex-app-exec/docker-environment.mjs';
 import {
   collectRoutingAssertions,
@@ -29,7 +30,9 @@ import {
   summarizeNotifications,
 } from '../../spikes/codex-app-exec/evidence.mjs';
 import { collectSecurityProbe, withHostCanaries } from '../../spikes/codex-app-exec/security-probe.mjs';
-import { collectNetworkProbe } from '../../spikes/codex-app-exec/network-probe.mjs';
+import {
+  classifyProbeResult, collectNetworkProbe, networkIsolationPassed,
+} from '../../spikes/codex-app-exec/network-probe.mjs';
 import {
   buildSanitizedSummary, renderSanitizedResult, routingSummary,
 } from '../../spikes/codex-app-exec/result-summary.mjs';
@@ -92,6 +95,7 @@ test('preuves app-server conservent les commandes objectives sans flux de texte 
     {
       method: 'item/completed',
       params: {
+        threadId: 'thread-1',
         item: {
           id: 'exec-1', type: 'commandExecution', status: 'completed',
           command: 'pwd', cwd: '/workspace', exitCode: 0, durationMs: 12,
@@ -99,12 +103,32 @@ test('preuves app-server conservent les commandes objectives sans flux de texte 
         },
       },
     },
-  ]);
+  ], { threadId: 'thread-1', environmentId: 'docker-routing' });
   assert.equal(summary.length, 1);
   assert.equal(summary[0].item.command, 'pwd');
   assert.equal(summary[0].item.cwd, '/workspace');
   assert.equal(summary[0].item.exitCode, 0);
+  assert.equal(summary[0].environmentId, 'docker-routing');
   assert.match(summary[0].item.outputHash, /^[0-9a-f]{64}$/);
+});
+
+test('policy Docker stdio impose network none sans port publié', () => {
+  const definition = environmentDefinition({
+    container: 'codex-app-exec-spike-policy',
+    volume: 'codex-app-exec-spike-policy-workspace',
+    environmentId: 'docker-policy',
+  });
+  assert.equal(definition.program, 'docker');
+  assert.deepEqual(definition.args.slice(0, 3), ['run', '--rm', '--interactive']);
+  assert.equal(definition.args[definition.args.indexOf('--network') + 1], 'none');
+  assert.equal(definition.args.includes('--publish'), false);
+  assert.equal(definition.args.at(-1), 'stdio');
+});
+
+test('timeout réseau reste NOT PROVEN', () => {
+  assert.deepEqual(classifyProbeResult({ timedOut: true }), {
+    status: 'not_proven', detail: { code: 'timeout' },
+  });
 });
 
 test('URL OAuth officielle avec PKCE, resource et scopes directs sans credential', () => {
@@ -176,6 +200,7 @@ test('générateur RESULT.md allowliste les preuves et refuse un credential conn
     containerFacts: { mounts: [{ name: 'volume-a' }] }, hostUnchanged: true,
   };
   const run = {
+    architecture: 'trusted host -> stdio -> isolated Docker',
     oauth: { scopes: ['openid', 'resource.invoke'], apiKeyUsed: false },
     versions: {
       platform: 'Windows', node: 'v24', codex: 'codex-cli 0.160.0',
@@ -199,11 +224,23 @@ test('générateur RESULT.md allowliste les preuves et refuse un credential conn
   const hardening = {
     securityChecks: { targetReadable: true, labContentInaccessible: true },
     network: {
-      dns: { hostDockerInternal: { status: 'reachable' }, gatewayDockerInternal: { status: 'reachable' } },
-      hostHttp: { status: 'reachable' }, internet: { status: 'reachable' },
-      dockerNetwork: { internal: false }, routes: { status: 'reachable' },
+      policy: { networkMode: 'none', publishedPorts: {} },
+      dns: { hostDockerInternal: { status: 'blocked' }, gatewayDockerInternal: { status: 'blocked' } },
+      hostTcp: { status: 'blocked' }, hostHttp: { status: 'blocked' },
+      routes: { status: 'blocked', mechanism: 'no_routes' },
+      interfaces: { names: ['lo'], nonLoopback: [] },
+      publicDestinations: {
+        'example.com': {
+          dns: { status: 'blocked' }, tcp443: { status: 'blocked' },
+          http: { status: 'blocked' }, https: { status: 'blocked' },
+        },
+        'www.iana.org': {
+          dns: { status: 'blocked' }, tcp443: { status: 'blocked' },
+          http: { status: 'blocked' }, https: { status: 'blocked' },
+        },
+      },
     },
-    unauthenticatedWebSocketRejected: true,
+    controlChannel: { status: 'pass', transport: 'stdio', listener: 'none' },
   };
   const summary = buildSanitizedSummary(run, hardening, [secret]);
   const markdown = renderSanitizedResult(summary, [secret]);
@@ -220,6 +257,16 @@ function routingEvent(command, { cwd = '/workspace', environmentId = 'docker-rou
     method: 'item/completed',
     environmentId,
     item: { type: 'commandExecution', status: 'completed', command, cwd, exitCode },
+  };
+}
+
+function fileChangeEvent(pathname, kind = 'update', environmentId = 'docker-routing') {
+  return {
+    method: 'item/completed',
+    environmentId,
+    item: {
+      type: 'fileChange', status: 'completed', changes: [{ path: pathname, kind }],
+    },
   };
 }
 
@@ -251,15 +298,32 @@ test('le texte agent ne prouve jamais les commandes git ou tests', () => {
 
 test('les événements objectifs prouvent pwd, lecture, git et tests dans le sandbox', () => {
   const routing = routingSummary(routingRun([
-    routingEvent('pwd'),
-    routingEvent('cat src/math.cjs'),
-    routingEvent('git status --short'),
-    routingEvent('npm test'),
+    routingEvent('/bin/sh -lc pwd'),
+    routingEvent("/bin/sh -lc 'cat src/math.cjs'"),
+    routingEvent("/bin/sh -lc 'git status --short'"),
+    routingEvent("/bin/sh -lc 'npm test || test $? -eq 1'"),
   ]));
   assert.equal(routing.shell, 'SANDBOX');
   assert.equal(routing.read, 'SANDBOX');
   assert.equal(routing.git, 'SANDBOX');
   assert.equal(routing.tests, 'SANDBOX');
+});
+
+test('create, modify, delete et patch exigent événements et état final cohérents', () => {
+  const routing = routingSummary(routingRun([
+    routingEvent("printf 'created in sandbox\\n' > routing-created.txt"),
+    routingEvent("printf 'modified in sandbox\\n' > routing-modify.txt"),
+    routingEvent('rm routing-delete.txt'),
+    fileChangeEvent('/workspace/routing-patch.txt', 'delete'),
+    fileChangeEvent('/workspace/routing-patch.txt', 'add'),
+  ]));
+  assert.equal(routing.create, 'SANDBOX');
+  assert.equal(routing.modify, 'SANDBOX');
+  assert.equal(routing.delete, 'SANDBOX');
+  assert.equal(routing.patch, 'SANDBOX');
+  assert.equal(routingSummary(routingRun([
+    routingEvent("printf 'created in sandbox\\n' > routing-created.txt"),
+  ], { after: { status: '' } })).create, 'NOT PROVEN');
 });
 
 test('un cwd hors workspace ne prouve aucune commande distante', () => {
@@ -298,6 +362,17 @@ test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip
     environments.push(baseline);
     const treatment = await startEnvironment('test-treatment');
     environments.push(treatment);
+    codexHome = await createTemporaryCodexHome();
+    client = await AppServerClient.start({
+      accessToken: new SensitiveValue('synthetic-not-a-real-token-123456789', 'synthetic'),
+      codexHome,
+      environments: [environmentDefinition(baseline), environmentDefinition(treatment)],
+    });
+    const [baselineInfo, treatmentInfo] = await Promise.all([
+      provisionEnvironment(client, baseline), provisionEnvironment(client, treatment),
+    ]);
+    assert.equal(baselineInfo.cwd, 'file:///workspace');
+    assert.equal(treatmentInfo.shell.name, 'sh');
     const [baselineInitial, treatmentInitial] = await Promise.all([
       collectWorkspaceSnapshot(baseline), collectWorkspaceSnapshot(treatment),
     ]);
@@ -316,30 +391,25 @@ test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip
     assert.equal(facts.mounts.length, 1);
     assert.equal(facts.mounts[0].type, 'volume');
     assert.equal(facts.mounts[0].destination, '/workspace');
-    assert.equal(facts.websocketAuthentication, 'capability-token-sha256');
-    assert.equal(await unauthenticatedWebSocketRejected(baseline.execServerUrl), true);
+    assert.equal(facts.controlTransport, 'stdio');
+    assert.equal(facts.networkDisabled, true);
+    assert.deepEqual(facts.publishedPorts, {});
 
     const network = await collectNetworkProbe(baseline);
-    const allowedNetworkStatuses = new Set(['reachable', 'blocked', 'not_proven']);
-    assert.ok(allowedNetworkStatuses.has(network.dns.hostDockerInternal.status));
-    assert.ok(allowedNetworkStatuses.has(network.dns.gatewayDockerInternal.status));
-    assert.ok(allowedNetworkStatuses.has(network.hostHttp.status));
-    assert.ok(allowedNetworkStatuses.has(network.internet.status));
-    assert.equal(network.dockerNetwork.internal, false);
-    assert.ok(network.routes.entries.length > 0);
-
-    codexHome = await createTemporaryCodexHome();
-    client = await AppServerClient.start({
-      accessToken: new SensitiveValue('synthetic-not-a-real-token-123456789', 'synthetic'),
-      codexHome,
-    });
-    const info = await client.addEnvironment(
-      baseline.execServerUrl,
-      'test-baseline',
-      baseline.execServerCredential,
-    );
-    assert.equal(info.cwd, 'file:///workspace');
-    assert.equal(info.shell.name, 'sh');
+    assert.equal(network.policy.networkMode, 'none');
+    assert.equal(network.routes.status, 'blocked');
+    assert.deepEqual(network.interfaces.nonLoopback, []);
+    assert.equal(network.dns.hostDockerInternal.status, 'blocked');
+    assert.equal(network.dns.gatewayDockerInternal.status, 'blocked');
+    assert.equal(network.hostTcp.status, 'blocked');
+    assert.equal(network.hostHttp.status, 'blocked');
+    assert.equal(networkIsolationPassed(network), true);
+    for (const probe of Object.values(network.publicDestinations)) {
+      assert.equal(probe.dns.status, 'blocked');
+      assert.equal(probe.tcp443.status, 'blocked');
+      assert.equal(probe.http.status, 'blocked');
+      assert.equal(probe.https.status, 'blocked');
+    }
 
     await withHostCanaries(async (canaries) => {
       const clean = await collectSecurityProbe(baseline, canaries);
@@ -374,5 +444,9 @@ test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip
     await client?.close();
     if (codexHome) await fs.rm(codexHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     for (const environment of environments.reverse()) await cleanupEnvironment(environment);
+  }
+  for (const environment of environments) {
+    assert.notEqual((await runProcess('docker', ['inspect', environment.container])).code, 0);
+    assert.notEqual((await runProcess('docker', ['volume', 'inspect', environment.volume])).code, 0);
   }
 });

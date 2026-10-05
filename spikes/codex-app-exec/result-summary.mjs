@@ -17,24 +17,87 @@ function modifiedFiles(status = '') {
   return status.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3)).sort();
 }
 
-function hasCompletedCommand(run) {
-  return (run.eventSummary ?? []).some((event) => (
-    event.item?.type === 'commandExecution' && event.item?.status === 'completed'
+function expectedEnvironmentId(run) {
+  if (typeof run.environmentId === 'string' && run.environmentId) return run.environmentId;
+  if (typeof run.variant === 'string' && run.variant) return `docker-${run.variant}`;
+  return null;
+}
+
+function workspaceCwd(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return false;
+  let value = cwd.replaceAll('\\', '/');
+  if (value.startsWith('file://')) {
+    try { value = decodeURIComponent(new URL(value).pathname); }
+    catch { return false; }
+  }
+  const segments = [];
+  for (const segment of value.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') segments.pop();
+    else segments.push(segment);
+  }
+  const normalized = `/${segments.join('/')}`;
+  return normalized === '/workspace' || normalized.startsWith('/workspace/');
+}
+
+function completedWorkspaceCommands(run) {
+  const environmentId = expectedEnvironmentId(run);
+  if (!environmentId) return [];
+  return (run.eventSummary ?? []).filter((event) => (
+    event.method === 'item/completed'
+    && event.environmentId === environmentId
+    && event.item?.type === 'commandExecution'
+    && event.item?.status === 'completed'
+    && typeof event.item?.command === 'string'
+    && workspaceCwd(event.item?.cwd)
   ));
 }
 
-function routingSummary(run) {
+function hasCommand(run, predicate, { successful = false } = {}) {
+  return completedWorkspaceCommands(run).some((event) => (
+    (!successful || event.item.exitCode === 0) && predicate(event.item.command.trim())
+  ));
+}
+
+function hasCompletedFileChange(run) {
+  const environmentId = expectedEnvironmentId(run);
+  if (!environmentId) return false;
+  return (run.eventSummary ?? []).some((event) => (
+    event.method === 'item/completed'
+    && event.environmentId === environmentId
+    && event.item?.type === 'fileChange'
+    && event.item?.status === 'completed'
+  ));
+}
+
+function finalStateHas(run, file, status) {
+  return String(run.after?.status ?? '').split(/\r?\n/).some((line) => (
+    line.length >= 4 && line.slice(3) === file && status(line.slice(0, 2))
+  ));
+}
+
+export function routingSummary(run) {
   const reported = run.routing ?? {};
   const sandbox = (value) => value ? 'SANDBOX' : 'NOT PROVEN';
+  const fileChange = hasCompletedFileChange(run);
   return {
-    read: sandbox(reported.read === true),
-    shell: sandbox(hasCompletedCommand(run)),
-    create: sandbox(reported.create === true),
-    modify: sandbox(reported.modify === true),
-    delete: sandbox(reported.delete === true),
-    patch: sandbox(reported.patch === true),
-    git: sandbox(run.hostUnchanged === true && /git status --short/i.test(run.agentResponse ?? '')),
-    tests: sandbox(/npm test/i.test(run.agentResponse ?? '')),
+    read: sandbox(hasCommand(run, (command) => (
+      /^(?:cat|head|tail|less|more)\s+(?:--\s+)?(?:\.\/|\/workspace\/)?src\/math\.cjs$/.test(command)
+      || /^sed\b.+\s(?:\.\/|\/workspace\/)?src\/math\.cjs$/.test(command)
+    ), { successful: true })),
+    shell: sandbox(hasCommand(run, (command) => /^(?:\/bin\/)?pwd$/.test(command))),
+    create: sandbox(fileChange && reported.create === true
+      && finalStateHas(run, 'routing-created.txt', (status) => status === '??' || status.includes('A'))),
+    modify: sandbox(fileChange && reported.modify === true
+      && finalStateHas(run, 'routing-modify.txt', (status) => status.includes('M'))),
+    delete: sandbox(fileChange && reported.delete === true
+      && finalStateHas(run, 'routing-delete.txt', (status) => status.includes('D'))),
+    patch: sandbox(fileChange && reported.patch === true
+      && finalStateHas(run, 'routing-patch.txt', (status) => status.includes('M'))),
+    git: sandbox(hasCommand(run, (command) => (
+      /^git(?:\s+-C\s+(?:\/workspace|\.))?\s+status\s+--short$/.test(command)
+    ))),
+    tests: sandbox(hasCommand(run, (command) => /^npm\s+test$/.test(command))),
   };
 }
 

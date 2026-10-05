@@ -50,14 +50,14 @@ Generated from the last completed real `run-all`. Detailed JSON evidence remains
 
 | Operation | Location |
 |---|---|
-| read | SANDBOX |
-| shell | SANDBOX |
-| create | SANDBOX |
-| modify | SANDBOX |
-| delete | SANDBOX |
-| patch | SANDBOX |
-| git | SANDBOX |
-| tests | SANDBOX |
+| read | NOT PROVEN |
+| shell | NOT PROVEN |
+| create | NOT PROVEN |
+| modify | NOT PROVEN |
+| delete | NOT PROVEN |
+| patch | NOT PROVEN |
+| git | NOT PROVEN |
+| tests | NOT PROVEN |
 
 ## Security checks
 

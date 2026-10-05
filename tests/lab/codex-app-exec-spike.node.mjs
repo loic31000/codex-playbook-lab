@@ -30,7 +30,9 @@ import {
 } from '../../spikes/codex-app-exec/evidence.mjs';
 import { collectSecurityProbe, withHostCanaries } from '../../spikes/codex-app-exec/security-probe.mjs';
 import { collectNetworkProbe } from '../../spikes/codex-app-exec/network-probe.mjs';
-import { buildSanitizedSummary, renderSanitizedResult } from '../../spikes/codex-app-exec/result-summary.mjs';
+import {
+  buildSanitizedSummary, renderSanitizedResult, routingSummary,
+} from '../../spikes/codex-app-exec/result-summary.mjs';
 import {
   FIXTURE_ROOT,
   LAB_ROOT,
@@ -211,6 +213,79 @@ test('générateur RESULT.md allowliste les preuves et refuse un credential conn
     () => buildSanitizedSummary({ ...run, baseline: { ...run.baseline, model: secret.reveal() } }, hardening, [secret]),
     /Credential connu/,
   );
+});
+
+function routingEvent(command, { cwd = '/workspace', environmentId = 'docker-routing', exitCode = 0 } = {}) {
+  return {
+    method: 'item/completed',
+    environmentId,
+    item: { type: 'commandExecution', status: 'completed', command, cwd, exitCode },
+  };
+}
+
+function routingRun(eventSummary = [], overrides = {}) {
+  return {
+    variant: 'routing',
+    environmentId: 'docker-routing',
+    eventSummary,
+    agentResponse: '',
+    routing: { read: true, create: true, modify: true, delete: true, patch: true },
+    after: {
+      status: ' D routing-delete.txt\n M routing-modify.txt\n M routing-patch.txt\n?? routing-created.txt\n',
+    },
+    ...overrides,
+  };
+}
+
+test('le texte agent ne prouve jamais les commandes git ou tests', () => {
+  const routing = routingSummary(routingRun([], {
+    agentResponse: "j'ai exécuté git status --short et npm test",
+  }));
+  assert.equal(routing.git, 'NOT PROVEN');
+  assert.equal(routing.tests, 'NOT PROVEN');
+  assert.equal(routing.create, 'NOT PROVEN');
+  assert.equal(routing.modify, 'NOT PROVEN');
+  assert.equal(routing.delete, 'NOT PROVEN');
+  assert.equal(routing.patch, 'NOT PROVEN');
+});
+
+test('les événements objectifs prouvent pwd, lecture, git et tests dans le sandbox', () => {
+  const routing = routingSummary(routingRun([
+    routingEvent('pwd'),
+    routingEvent('cat src/math.cjs'),
+    routingEvent('git status --short'),
+    routingEvent('npm test'),
+  ]));
+  assert.equal(routing.shell, 'SANDBOX');
+  assert.equal(routing.read, 'SANDBOX');
+  assert.equal(routing.git, 'SANDBOX');
+  assert.equal(routing.tests, 'SANDBOX');
+});
+
+test('un cwd hors workspace ne prouve aucune commande distante', () => {
+  const routing = routingSummary(routingRun([
+    routingEvent('pwd', { cwd: 'C:/Users/example/repository' }),
+    routingEvent('git status --short', { cwd: '/host/repository' }),
+    routingEvent('npm test', { cwd: '/workspace/../host' }),
+  ]));
+  assert.equal(routing.shell, 'NOT PROVEN');
+  assert.equal(routing.git, 'NOT PROVEN');
+  assert.equal(routing.tests, 'NOT PROVEN');
+});
+
+test('un mauvais environmentId ou une lecture absente reste NOT PROVEN', () => {
+  const wrongEnvironment = routingSummary(routingRun([
+    routingEvent('git status --short', { environmentId: 'docker-other' }),
+    routingEvent('npm test', { environmentId: 'docker-other' }),
+    routingEvent('cat src/math.cjs', { environmentId: 'docker-other' }),
+  ]));
+  assert.equal(wrongEnvironment.git, 'NOT PROVEN');
+  assert.equal(wrongEnvironment.tests, 'NOT PROVEN');
+  assert.equal(wrongEnvironment.read, 'NOT PROVEN');
+  assert.equal(routingSummary(routingRun()).read, 'NOT PROVEN');
+  assert.equal(routingSummary(routingRun([
+    routingEvent('cat src/math.cjs', { exitCode: 1 }),
+  ])).read, 'NOT PROVEN');
 });
 
 test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip: !dockerAvailable, timeout: 180_000 }, async () => {

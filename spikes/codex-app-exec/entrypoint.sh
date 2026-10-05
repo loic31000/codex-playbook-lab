@@ -13,6 +13,14 @@ if [ ! -f /workspace/package.json ]; then
 fi
 
 mkdir -p "${CODEX_HOME:-/tmp/codex-home}"
+
+if [ "$#" -ne 1 ]; then
+  echo "expected exec-server capability-token SHA-256" >&2
+  exit 64
+fi
+
 exec codex exec-server \
   --listen ws://0.0.0.0:4500 \
+  --ws-auth capability-token \
+  --ws-token-sha256 "$1" \
   --linux-sandbox-pid-namespace isolate

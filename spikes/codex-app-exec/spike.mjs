@@ -3,13 +3,19 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { AppServerClient, createTemporaryCodexHome } from './app-server-client.mjs';
-import { getChatgptPlanCredential, oauthPaths, signIn } from './chatgpt-oauth.mjs';
+import {
+  getChatgptPlanCredential,
+  getStoredCredentialGuards,
+  oauthPaths,
+  signIn,
+} from './chatgpt-oauth.mjs';
 import {
   buildImage,
   cleanupEnvironment,
   collectContainerFacts,
   dockerExec,
   startEnvironment,
+  unauthenticatedWebSocketRejected,
 } from './docker-environment.mjs';
 import {
   agentText,
@@ -20,6 +26,8 @@ import {
   summarizeNotifications,
 } from './evidence.mjs';
 import { checkedProcess } from './process.mjs';
+import { collectNetworkProbe } from './network-probe.mjs';
+import { writeSanitizedResult } from './result-summary.mjs';
 import { runCodexVersion } from '../../src/core/codex-process.mjs';
 import { collectSecurityProbe, withHostCanaries } from './security-probe.mjs';
 import {
@@ -75,10 +83,10 @@ async function versions() {
   };
 }
 
-async function writeEvidence(name, value, accessToken = null) {
+async function writeEvidence(name, value, credentials = []) {
   const directory = path.join(SPIKE_ROOT, 'evidence');
   await fs.mkdir(directory, { recursive: true });
-  const secrets = accessToken ? [accessToken] : [];
+  const secrets = Array.isArray(credentials) ? credentials : [credentials];
   await fs.writeFile(path.join(directory, `${name}.json`), safeEvidence(value, secrets), 'utf8');
 }
 
@@ -111,7 +119,7 @@ async function phaseBInference(credential) {
       eventSummary: summarizeNotifications(events),
       appServerStderr: client.stderr,
     };
-    await writeEvidence('phase-b-inference', evidence, credential.accessToken);
+    await writeEvidence('phase-b-inference', evidence, [credential.accessToken]);
     return evidence;
   } finally {
     await client?.close();
@@ -130,7 +138,13 @@ async function runRemoteTurn(client, { label, prompt, developerInstructions = nu
     const initial = await collectWorkspaceSnapshot(environment);
     const testsBefore = await runTargetTests(environment);
     const execVersion = (await dockerExec(environment, ['codex', '--version'])).stdout.trim();
-    const info = await client.addEnvironment(environment.execServerUrl, environmentId);
+    const websocketAuthRejected = await unauthenticatedWebSocketRejected(environment.execServerUrl);
+    if (!websocketAuthRejected) throw new Error('exec-server accepte une connexion WebSocket non authentifiée');
+    const info = await client.addEnvironment(
+      environment.execServerUrl,
+      environmentId,
+      environment.execServerCredential,
+    );
     const startIndex = client.notifications.length;
     const threadId = await client.startThread({
       model: MODEL,
@@ -152,6 +166,7 @@ async function runRemoteTurn(client, { label, prompt, developerInstructions = nu
       reasoningEffort: EFFORT,
       codexVersion: execVersion,
       environmentInfo: info,
+      unauthenticatedWebSocketRejected: websocketAuthRejected,
       promptFingerprint: promptFingerprint(`${developerInstructions ?? ''}\n${prompt}`),
       durationMs: result.durationMs,
       technicalStatus: result.turn.status,
@@ -188,11 +203,47 @@ async function prepare() {
         initial: await collectWorkspaceSnapshot(environment),
         testsBefore: await runTargetTests(environment),
         versions: await versions(),
+        unauthenticatedWebSocketRejected: await unauthenticatedWebSocketRejected(environment.execServerUrl),
+        network: await collectNetworkProbe(environment),
       };
       evidence.securityPass = securityProbePassed(evidence.security);
       await writeEvidence('prepare', evidence);
       return evidence;
     } finally { await cleanupEnvironment(environment); }
+  });
+}
+
+async function harden() {
+  await buildImage();
+  const knownSecrets = await getStoredCredentialGuards();
+  return withHostCanaries(async (canaries) => {
+    const environment = await startEnvironment('hardening');
+    try {
+      const security = await collectSecurityProbe(environment, canaries);
+      const evidence = {
+        timestamp: new Date().toISOString(),
+        containerFacts: await collectContainerFacts(environment),
+        security,
+        securityChecks: assessSecurityProbe(security),
+        securityPass: securityProbePassed(security),
+        network: await collectNetworkProbe(environment),
+        unauthenticatedWebSocketRejected: await unauthenticatedWebSocketRejected(environment.execServerUrl),
+      };
+      if (!evidence.securityPass) throw new Error('La probe de sécurité renforcée a échoué');
+      if (!evidence.unauthenticatedWebSocketRejected) {
+        throw new Error('La connexion exec-server non authentifiée a été acceptée');
+      }
+      await writeEvidence('hardening', evidence, knownSecrets);
+      await writeSanitizedResult({
+        runEvidencePath: path.join(SPIKE_ROOT, 'evidence', 'run-all.json'),
+        hardening: evidence,
+        resultPath: path.join(SPIKE_ROOT, 'RESULT.md'),
+        knownSecrets,
+      });
+      return evidence;
+    } finally {
+      await cleanupEnvironment(environment);
+    }
   });
 }
 
@@ -235,7 +286,7 @@ async function runAll() {
       appServerStderr: client.stderr,
     };
     if (containsSecret(evidence, [credential.accessToken])) throw new Error('Credential détecté dans les preuves finales');
-    await writeEvidence('run-all', evidence, credential.accessToken);
+    await writeEvidence('run-all', evidence, [credential.accessToken]);
     return evidence;
   } finally {
     await client?.close();
@@ -250,7 +301,8 @@ async function main() {
   else if (command === 'signin') result = await signIn();
   else if (command === 'phase-b') result = await phaseBInference(await getChatgptPlanCredential({ interactive: true }));
   else if (command === 'run-all') result = await runAll();
-  else throw new Error('Usage: node spike.mjs <prepare|signin|phase-b|run-all>');
+  else if (command === 'harden') result = await harden();
+  else throw new Error('Usage: node spike.mjs <prepare|signin|phase-b|run-all|harden>');
   const safeSummary = command === 'signin'
     ? { signedIn: true, scopes: result.metadata.scopes, expiresAt: result.metadata.expires_at }
     : { command, completed: true, evidenceDirectory: path.join(SPIKE_ROOT, 'evidence') };

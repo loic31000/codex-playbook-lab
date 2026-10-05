@@ -1,7 +1,10 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+import { runCodexVersion } from '../../src/core/codex-process.mjs';
 import { checkedProcess, runProcess } from './process.mjs';
 import {
   CODEX_VERSION,
@@ -10,7 +13,10 @@ import {
   LAB_ROOT,
   SPIKE_ROOT,
   FORBIDDEN_SECRET_ENV,
+  SensitiveValue,
+  assertPinnedCodexVersion,
   mountPolicyViolations,
+  sha256,
 } from './spike-support.mjs';
 
 const PREFIX = 'codex-app-exec-spike-';
@@ -20,6 +26,7 @@ function assertOwnedName(value) {
 }
 
 export async function buildImage() {
+  assertPinnedCodexVersion((await runCodexVersion()).stdout);
   const context = await fs.mkdtemp(path.join(os.tmpdir(), PREFIX));
   try {
     await fs.copyFile(path.join(SPIKE_ROOT, 'Dockerfile'), path.join(context, 'Dockerfile'));
@@ -39,6 +46,11 @@ export async function startEnvironment(label) {
   const container = `${PREFIX}${suffix}`;
   const volume = `${container}-workspace`;
   const network = `${container}-network`;
+  const execServerCredential = new SensitiveValue(
+    crypto.randomBytes(32).toString('base64url'),
+    'exec-server-capability-token',
+  );
+  const execServerCredentialHash = sha256(execServerCredential.reveal());
   for (const name of [container, volume, network]) assertOwnedName(name);
   await checkedProcess('docker', ['volume', 'create', volume]);
   await checkedProcess('docker', ['network', 'create', network]);
@@ -52,7 +64,7 @@ export async function startEnvironment(label) {
       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges=true',
       '--pids-limit', '256', '--memory', '1g', '--cpus', '2',
       '--env', 'HOME=/tmp/home', '--env', 'CODEX_HOME=/tmp/codex-home',
-      IMAGE_NAME,
+      IMAGE_NAME, execServerCredentialHash,
     ], { timeoutMs: 120_000 });
     const portOutput = await checkedProcess('docker', ['port', container, '4500/tcp']);
     const match = portOutput.stdout.trim().match(/127\.0\.0\.1:(\d+)/);
@@ -61,11 +73,52 @@ export async function startEnvironment(label) {
     const inspect = JSON.parse((await checkedProcess('docker', ['inspect', container])).stdout)[0];
     const mountViolations = mountPolicyViolations(inspect.Mounts, [LAB_ROOT, os.homedir()]);
     if (mountViolations.length) throw new Error(`Mount host interdit : ${mountViolations.join(', ')}`);
-    return { container, volume, network, execServerUrl, inspect };
+    return { container, volume, network, execServerUrl, execServerCredential, inspect };
   } catch (error) {
     await cleanupEnvironment({ container, volume, network });
     throw error;
   }
+}
+
+async function waitForTcp(url, timeoutMs = 10_000) {
+  const target = new URL(url);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const connected = await new Promise((resolve) => {
+      const socket = net.createConnection({ host: target.hostname, port: Number(target.port) });
+      socket.setTimeout(500);
+      socket.once('connect', () => { socket.destroy(); resolve(true); });
+      socket.once('timeout', () => { socket.destroy(); resolve(false); });
+      socket.once('error', () => resolve(false));
+    });
+    if (connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('Le listener exec-server n’est pas devenu joignable à temps');
+}
+
+export async function unauthenticatedWebSocketRejected(execServerUrl) {
+  await waitForTcp(execServerUrl);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const websocket = new WebSocket(execServerUrl);
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { websocket.close(); } catch {}
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { websocket.close(); } catch {}
+      reject(new Error('Handshake WebSocket non authentifié indéterminé'));
+    }, 5_000);
+    websocket.addEventListener('open', () => finish(false), { once: true });
+    websocket.addEventListener('error', () => finish(true), { once: true });
+    websocket.addEventListener('close', () => finish(true), { once: true });
+  });
 }
 
 export async function dockerExec(environment, command, options = {}) {
@@ -93,6 +146,7 @@ export async function collectContainerFacts(environment) {
     capDrop: inspect.HostConfig.CapDrop ?? [],
     securityOpt: inspect.HostConfig.SecurityOpt ?? [],
     dockerSocketMounted: inspect.Mounts.some((mount) => mount.Destination === '/var/run/docker.sock'),
+    websocketAuthentication: 'capability-token-sha256',
   };
 }
 

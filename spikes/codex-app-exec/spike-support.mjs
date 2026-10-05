@@ -15,6 +15,15 @@ export const TARGET_CWD = '/workspace';
 export const REQUIRED_DIRECT_SCOPES = ['resource.invoke', 'chatgpt.tokens.use.direct'];
 export const FORBIDDEN_SECRET_ENV = /(?:OPENAI_API_KEY|ACCESS_TOKEN|REFRESH_TOKEN|OAUTH|CODEX_API_KEY|GITHUB_TOKEN|GH_TOKEN|SSH_AUTH_SOCK)/i;
 
+export function assertPinnedCodexVersion(versionOutput) {
+  const actual = String(versionOutput).trim();
+  const expected = `codex-cli ${CODEX_VERSION}`;
+  if (actual !== expected) {
+    throw new Error(`Ce spike exige ${expected}; version observée : ${actual || 'inconnue'}. Revalidez le routage avant mise à jour.`);
+  }
+  return actual;
+}
+
 export class SensitiveValue {
   #value;
 
@@ -85,6 +94,9 @@ export function assessSecurityProbe(report) {
     ...(report.fakeOauthMatches ?? []),
     ...(report.fakeAuthMatches ?? []),
     ...(report.realAuthMatches ?? []),
+    ...(report.labContentMatches ?? []),
+    ...(report.fakeOauthContentMatches ?? []),
+    ...(report.fakeAuthContentMatches ?? []),
   ];
   return {
     targetReadable: report.targetReadable === true,
@@ -94,6 +106,9 @@ export function assessSecurityProbe(report) {
     authJsonInaccessible: (report.realAuthMatches ?? []).length === 0,
     oauthInaccessible: (report.secretEnvNames ?? []).length === 0,
     fakeOauthInaccessible: (report.fakeOauthMatches ?? []).length === 0,
+    labContentInaccessible: (report.labContentMatches ?? []).length === 0,
+    fakeOauthContentInaccessible: (report.fakeOauthContentMatches ?? []).length === 0,
+    fakeAuthContentInaccessible: (report.fakeAuthContentMatches ?? []).length === 0,
     dockerSocketInaccessible: report.dockerSocketVisible !== true,
     secretEnvAbsent: (report.secretEnvNames ?? []).length === 0,
   };

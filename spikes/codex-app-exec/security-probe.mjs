@@ -24,6 +24,18 @@ async function findNames(environment, patterns) {
   return lines(result.stdout);
 }
 
+async function findContent(environment, pattern) {
+  if (!/^[A-Z0-9_]+$/.test(pattern)) throw new Error('Sentinelle de contenu invalide');
+  const command = [
+    'find /',
+    "\\( -path /proc -o -path /sys -o -path /dev -o -path /run \\) -prune -o",
+    '-type f -readable -print0 2>/dev/null',
+    `| xargs -0 -r grep -l -F -- '${pattern}' 2>/dev/null`,
+  ].join(' ');
+  const result = await dockerExec(environment, ['sh', '-lc', command], { timeoutMs: 120_000 });
+  return lines(result.stdout);
+}
+
 export async function withHostCanaries(callback) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-app-exec-canaries-'));
   const suffix = crypto.randomBytes(8).toString('hex');
@@ -32,11 +44,14 @@ export async function withHostCanaries(callback) {
     labName: `LAB_SENTINEL_DO_NOT_EXPOSE_${suffix}`,
     oauthName: `FAKE_OAUTH_TOKEN_DO_NOT_EXPOSE_${suffix}`,
     authName: `FAKE_AUTH_JSON_DO_NOT_EXPOSE_${suffix}.json`,
+    labContent: `LAB_CONTENT_DO_NOT_EXPOSE_${suffix.toUpperCase()}`,
+    oauthContent: `FAKE_OAUTH_CONTENT_DO_NOT_EXPOSE_${suffix.toUpperCase()}`,
+    authContent: `FAKE_AUTH_CONTENT_DO_NOT_EXPOSE_${suffix.toUpperCase()}`,
   };
   await Promise.all([
-    fs.writeFile(path.join(root, canaries.labName), 'non-sensitive lab canary\n', 'utf8'),
-    fs.writeFile(path.join(root, canaries.oauthName), 'non-sensitive OAuth canary\n', 'utf8'),
-    fs.writeFile(path.join(root, canaries.authName), '{"fake":true}\n', 'utf8'),
+    fs.writeFile(path.join(root, canaries.labName), `${canaries.labContent}\n`, 'utf8'),
+    fs.writeFile(path.join(root, canaries.oauthName), `${canaries.oauthContent}\n`, 'utf8'),
+    fs.writeFile(path.join(root, canaries.authName), `${canaries.authContent}\n`, 'utf8'),
   ]);
   try { return await callback(canaries); }
   finally { await fs.rm(root, { recursive: true, force: true }); }
@@ -48,11 +63,17 @@ export async function collectSecurityProbe(environment, canaries) {
     environment,
     "printf 'probe\\n' > /workspace/.security-write-probe && rm /workspace/.security-write-probe",
   );
-  const [labSentinelMatches, fakeOauthMatches, fakeAuthMatches, realAuthMatches] = await Promise.all([
+  const [
+    labSentinelMatches, fakeOauthMatches, fakeAuthMatches, realAuthMatches,
+    labContentMatches, fakeOauthContentMatches, fakeAuthContentMatches,
+  ] = await Promise.all([
     findNames(environment, [path.basename(LAB_SENTINEL), canaries.labName]),
     findNames(environment, [canaries.oauthName]),
     findNames(environment, [canaries.authName]),
     findNames(environment, ['auth.json']),
+    findContent(environment, canaries.labContent),
+    findContent(environment, canaries.oauthContent),
+    findContent(environment, canaries.authContent),
   ]);
   const envResult = await dockerExec(environment, [
     'sh', '-lc',
@@ -66,6 +87,9 @@ export async function collectSecurityProbe(environment, canaries) {
     fakeOauthMatches,
     fakeAuthMatches,
     realAuthMatches,
+    labContentMatches,
+    fakeOauthContentMatches,
+    fakeAuthContentMatches,
     dockerSocketVisible: await execOk(environment, 'test -e /var/run/docker.sock'),
     hostHomeVisible: await execOk(environment, "test -d '/host' -o -d '/mnt/host' -o -d '/run/desktop/mnt/host'"),
     environmentNames: envNames,

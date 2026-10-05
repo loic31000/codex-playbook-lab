@@ -131,6 +131,15 @@ async function loadSession() {
   return { metadata, tokens };
 }
 
+export async function getStoredCredentialGuards() {
+  const { tokens } = await loadSession();
+  return [
+    new SensitiveValue(tokens.access_token, 'oauth-access-token'),
+    new SensitiveValue(tokens.refresh_token, 'oauth-refresh-token'),
+    new SensitiveValue(tokens.id_token, 'oauth-id-token'),
+  ];
+}
+
 export function buildAuthorizationUrl({ clientId, hostId, redirectUri, state, nonce, challenge, idTokenHint }) {
   const parameters = new URLSearchParams({
     client_id: clientId,

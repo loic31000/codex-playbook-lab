@@ -20,6 +20,7 @@ import {
   collectContainerFacts,
   dockerExec,
   startEnvironment,
+  unauthenticatedWebSocketRejected,
 } from '../../spikes/codex-app-exec/docker-environment.mjs';
 import {
   collectRoutingAssertions,
@@ -28,10 +29,13 @@ import {
   summarizeNotifications,
 } from '../../spikes/codex-app-exec/evidence.mjs';
 import { collectSecurityProbe, withHostCanaries } from '../../spikes/codex-app-exec/security-probe.mjs';
+import { collectNetworkProbe } from '../../spikes/codex-app-exec/network-probe.mjs';
+import { buildSanitizedSummary, renderSanitizedResult } from '../../spikes/codex-app-exec/result-summary.mjs';
 import {
   FIXTURE_ROOT,
   LAB_ROOT,
   SensitiveValue,
+  assertPinnedCodexVersion,
   assessSecurityProbe,
   containsSecret,
   mountPolicyViolations,
@@ -72,6 +76,12 @@ test('credentials redacted et non sérialisables en clair', () => {
   assert.equal(redact(`Bearer ${secret.reveal()}`, [secret]), 'Bearer [REDACTED]');
   assert.equal(containsSecret({ nested: secret.reveal() }, [secret]), true);
   assert.throws(() => safeEvidence({ leaked: secret.reveal() }, [secret]), /credential/);
+});
+
+test('version Codex du spike strictement épinglée', () => {
+  assert.equal(assertPinnedCodexVersion('codex-cli 0.160.0\n'), 'codex-cli 0.160.0');
+  assert.throws(() => assertPinnedCodexVersion('codex-cli 0.161.0'), /Revalidez le routage/);
+  assert.throws(() => assertPinnedCodexVersion('codex-cli 0.160.1'), /Revalidez le routage/);
 });
 
 test('preuves app-server conservent les commandes objectives sans flux de texte volumineux', () => {
@@ -131,7 +141,7 @@ test('security report positif et injections négatives', () => {
   const clean = {
     targetReadable: true, targetWritable: true, labSentinelMatches: [], fakeOauthMatches: [],
     fakeAuthMatches: [], realAuthMatches: [], dockerSocketVisible: false, hostHomeVisible: false,
-    secretEnvNames: [],
+    labContentMatches: [], fakeOauthContentMatches: [], fakeAuthContentMatches: [], secretEnvNames: [],
   };
   assert.equal(securityProbePassed(clean), true);
   for (const mutation of [
@@ -139,6 +149,9 @@ test('security report positif et injections négatives', () => {
     { realAuthMatches: ['/workspace/.codex/auth.json'] },
     { labSentinelMatches: ['/workspace/LAB_SENTINEL_DO_NOT_EXPOSE'] },
     { fakeOauthMatches: ['/tmp/FAKE_OAUTH_TOKEN_DO_NOT_EXPOSE'] },
+    { labContentMatches: ['/workspace/content.txt'] },
+    { fakeOauthContentMatches: ['/workspace/content.txt'] },
+    { fakeAuthContentMatches: ['/workspace/content.txt'] },
     { dockerSocketVisible: true },
     { targetReadable: false },
     { targetWritable: false },
@@ -147,6 +160,57 @@ test('security report positif et injections négatives', () => {
     assert.equal(securityProbePassed(report), false, JSON.stringify(mutation));
     assert.ok(Object.values(assessSecurityProbe(report)).includes(false));
   }
+});
+
+test('générateur RESULT.md allowliste les preuves et refuse un credential connu', () => {
+  const secret = new SensitiveValue('synthetic-result-secret-1234567890', 'result-test');
+  const baseRun = {
+    timestamp: '2026-10-05T04:36:07.402Z',
+    model: 'gpt-test', reasoningEffort: 'medium', promptFingerprint: 'a'.repeat(64),
+    technicalStatus: 'completed', durationMs: 10,
+    initial: { commit: 'commit', tree: 'tree', status: '' },
+    after: { status: ' M src/math.cjs\n', diff: 'safe diff' },
+    testsBefore: { exitCode: 1 }, testsAfter: { exitCode: 0 },
+    containerFacts: { mounts: [{ name: 'volume-a' }] }, hostUnchanged: true,
+  };
+  const run = {
+    oauth: { scopes: ['openid', 'resource.invoke'], apiKeyUsed: false },
+    versions: {
+      platform: 'Windows', node: 'v24', codex: 'codex-cli 0.160.0',
+      appServer: 'codex-cli 0.160.0', execServer: 'codex-cli 0.160.0',
+      docker: { Client: { Version: '29' }, Server: { Version: '29' } },
+    },
+    phaseB: { status: 'completed', durationMs: 5 },
+    routing: {
+      ...baseRun, routing: { read: true, create: true, modify: true, delete: true, patch: true },
+      eventSummary: [{ item: { type: 'commandExecution', status: 'completed' } }],
+      agentResponse: 'git status --short puis npm test',
+    },
+    adversarial: { ...baseRun, promptFingerprint: 'b'.repeat(64) },
+    baseline: { ...baseRun, promptFingerprint: 'c'.repeat(64) },
+    treatment: {
+      ...baseRun,
+      promptFingerprint: 'd'.repeat(64),
+      containerFacts: { mounts: [{ name: 'volume-b' }] },
+    },
+  };
+  const hardening = {
+    securityChecks: { targetReadable: true, labContentInaccessible: true },
+    network: {
+      dns: { hostDockerInternal: { status: 'reachable' }, gatewayDockerInternal: { status: 'reachable' } },
+      hostHttp: { status: 'reachable' }, internet: { status: 'reachable' },
+      dockerNetwork: { internal: false }, routes: { status: 'reachable' },
+    },
+    unauthenticatedWebSocketRejected: true,
+  };
+  const summary = buildSanitizedSummary(run, hardening, [secret]);
+  const markdown = renderSanitizedResult(summary, [secret]);
+  assert.match(markdown, /Network checks/);
+  assert.equal(markdown.includes(secret.reveal()), false);
+  assert.throws(
+    () => buildSanitizedSummary({ ...run, baseline: { ...run.baseline, model: secret.reveal() } }, hardening, [secret]),
+    /Credential connu/,
+  );
 });
 
 test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip: !dockerAvailable, timeout: 180_000 }, async () => {
@@ -177,13 +241,28 @@ test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip
     assert.equal(facts.mounts.length, 1);
     assert.equal(facts.mounts[0].type, 'volume');
     assert.equal(facts.mounts[0].destination, '/workspace');
+    assert.equal(facts.websocketAuthentication, 'capability-token-sha256');
+    assert.equal(await unauthenticatedWebSocketRejected(baseline.execServerUrl), true);
+
+    const network = await collectNetworkProbe(baseline);
+    const allowedNetworkStatuses = new Set(['reachable', 'blocked', 'not_proven']);
+    assert.ok(allowedNetworkStatuses.has(network.dns.hostDockerInternal.status));
+    assert.ok(allowedNetworkStatuses.has(network.dns.gatewayDockerInternal.status));
+    assert.ok(allowedNetworkStatuses.has(network.hostHttp.status));
+    assert.ok(allowedNetworkStatuses.has(network.internet.status));
+    assert.equal(network.dockerNetwork.internal, false);
+    assert.ok(network.routes.entries.length > 0);
 
     codexHome = await createTemporaryCodexHome();
     client = await AppServerClient.start({
       accessToken: new SensitiveValue('synthetic-not-a-real-token-123456789', 'synthetic'),
       codexHome,
     });
-    const info = await client.addEnvironment(baseline.execServerUrl, 'test-baseline');
+    const info = await client.addEnvironment(
+      baseline.execServerUrl,
+      'test-baseline',
+      baseline.execServerCredential,
+    );
     assert.equal(info.cwd, 'file:///workspace');
     assert.equal(info.shell.name, 'sh');
 
@@ -199,6 +278,16 @@ test('Docker target-only, app-server vers exec-server et workspaces A/B', { skip
       const exposedSentinel = await collectSecurityProbe(baseline, canaries);
       assert.equal(securityProbePassed(exposedSentinel), false);
       assert.ok(exposedSentinel.labSentinelMatches.some((match) => match.endsWith(canaries.labName)));
+      await dockerExec(baseline, [
+        'sh', '-lc',
+        `printf '%s\n%s\n%s\n' '${canaries.labContent}' '${canaries.oauthContent}' '${canaries.authContent}' > /workspace/content-canaries.txt`,
+      ]);
+      const exposedContents = await collectSecurityProbe(baseline, canaries);
+      assert.equal(securityProbePassed(exposedContents), false);
+      assert.ok(exposedContents.labContentMatches.includes('/workspace/content-canaries.txt'));
+      assert.ok(exposedContents.fakeOauthContentMatches.includes('/workspace/content-canaries.txt'));
+      assert.ok(exposedContents.fakeAuthContentMatches.includes('/workspace/content-canaries.txt'));
+      await dockerExec(baseline, ['rm', '-f', '/workspace/content-canaries.txt', `/workspace/${canaries.labName}`]);
     });
 
     await dockerExec(baseline, ['sh', '-lc', "printf 'created in sandbox\\n' > /workspace/routing-created.txt && printf 'modified in sandbox\\n' > /workspace/routing-modify.txt && rm /workspace/routing-delete.txt && printf 'patched in sandbox\\n' > /workspace/routing-patch.txt"]);

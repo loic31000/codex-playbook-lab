@@ -137,10 +137,15 @@ export class AppServerClient {
     });
   }
 
-  async addEnvironment(execServerUrl, environmentId = ENVIRONMENT_ID) {
+  async addEnvironment(execServerUrl, environmentId = ENVIRONMENT_ID, authBearerToken) {
+    if (!(authBearerToken instanceof SensitiveValue)) {
+      throw new Error('Le capability-token exec-server doit être encapsulé');
+    }
+    this.#secrets.push(authBearerToken);
     await this.request('environment/add', {
       environmentId,
       execServerUrl,
+      authBearerToken: authBearerToken.reveal(),
       connectTimeoutMs: 30_000,
     });
     const info = await this.request('environment/info', { environmentId });

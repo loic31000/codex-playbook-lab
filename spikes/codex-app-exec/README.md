@@ -35,6 +35,7 @@ node --test tests/lab/codex-app-exec-spike.node.mjs
 node spikes/codex-app-exec/spike.mjs prepare
 node spikes/codex-app-exec/spike.mjs signin
 node spikes/codex-app-exec/spike.mjs run-all
+node spikes/codex-app-exec/spike.mjs harden
 ```
 
 `signin` ouvre le navigateur pour le consentement. Les access, refresh et ID
@@ -50,6 +51,10 @@ Les preuves locales JSON sont écrites dans `evidence/`, ignoré par Git. Elles
 refusent la sérialisation du jeton connu et redacted les formes Bearer. Elles ne
 doivent jamais être publiées sans une nouvelle revue de secrets.
 
+`harden` ne lance aucun modèle. Il mesure le réseau et les sentinelles depuis le
+même type de conteneur, puis génère `RESULT.md` depuis le dernier `run-all` réel.
+Ce résumé commit-able utilise une allowlist et refuse tout credential connu.
+
 ## Résultat observé le 5 octobre 2026
 
 - OAuth dynamique : scopes `resource.invoke` et
@@ -58,11 +63,16 @@ doivent jamais être publiées sans une nouvelle revue de secrets.
   statut `completed`.
 - Primitive distante : `environment/add` vers le WebSocket loopback publié par
   `exec-server`, cwd retourné `file:///workspace`.
+- Le listener `exec-server` exige un capability-token aléatoire éphémère. Seul
+  son SHA-256 est fourni au conteneur ; le token est transmis par le champ
+  officiel `authBearerToken` de `environment/add`. Une connexion sans token est
+  refusée.
 - Routage : lecture, shell, création, modification, suppression, file change
   (`apply_patch`), Git et tests observés dans le conteneur ; le snapshot Git du
   Lab est resté identique avant/après.
 - Probe déterministe : target lisible/inscriptible ; aucune sentinel Lab/OAuth,
-  aucun `auth.json`, secret d'environnement, home hôte ou socket Docker visible.
+  aucun contenu de sentinel, `auth.json`, secret d'environnement, home hôte ou
+  socket Docker visible.
 - Probe Codex adversariale : aucune sentinel ni credential réel confirmé, aucun
   socket Docker ; résultat cohérent avec la probe déterministe.
 - Tâche réelle : test initial en échec, `src/math.cjs` seul modifié de `a - b`
@@ -74,17 +84,26 @@ doivent jamais être publiées sans une nouvelle revue de secrets.
   produit le même diff minimal et un test vert. Seul le traitement recevait
   l'instruction additionnelle déterministe.
 
-Conclusion technique du spike : **DECISION A — Codex natif retenu** pour cette
-frontière expérimentale. Cette conclusion prouve le chemin testé, pas une
-isolation formelle ni une architecture V2 complète.
+### Décision
+
+**DECISION B — Codex natif retenu comme base sous condition de durcissement
+réseau.**
+
+La frontière OAuth/filesystem est prouvée pour ce run. L'isolation réseau
+Docker est une propriété distincte et n'est pas fournie par cette configuration.
+Un target peut lui-même contenir des données confidentielles : l'egress est donc
+un risque même quand aucun credential du Lab n'entre dans le conteneur.
 
 ## Limites observées
 
-- L'API `environment/add` et le champ `environments` nécessitent la capability
-  expérimentale d'`app-server` dans Codex `0.160.0`.
+- L'API `environment/add` et le champ `environments` sont expérimentaux. Codex
+  `0.160.0` est l'unique version validée ; le runner refuse toute autre version
+  et une mise à jour exige une nouvelle validation complète du routage.
 - Le réseau Docker dédié n'est pas `--internal` : Docker Desktop ne publiait
-  alors pas le port loopback nécessaire. Le conteneur conserve donc un egress,
-  mais ne contient aucun credential à exfiltrer.
+  alors pas le port loopback nécessaire. La probe renforcée a résolu
+  `host.docker.internal` et `gateway.docker.internal`, atteint un serveur HTTP
+  factice sur le host et obtenu une réponse d'`example.com`. Conclusion réseau :
+  **FAIL / NOT PROVIDED**.
 - `app-server` émet des avertissements de conversion de chemins Windows pour
   ses recherches de plugins (`C:\workspace`) alors que les outils distants ont
   bien opéré dans `/workspace`.

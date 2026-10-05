@@ -9,6 +9,7 @@ import {
   createExperimentRun,
   createTestCase,
   parseExperimentJson,
+  parseHumanDecisionStatus,
   parseHumanReviewStatus,
   parseTechnicalStatus,
   recordHumanReview,
@@ -135,15 +136,35 @@ describe("Experiment domain foundation", () => {
     expect(completed.technicalStatus).toBe("completed");
     expect(completed.humanReviewStatus).toBe("pending_review");
     expect(completed.evidence).toHaveLength(1);
+  });
 
-    const reviewed = recordHumanReview(completed, {
-      status: "approved",
+  it.each(["approved", "rejected", "uncertain"] as const)(
+    "enregistre la decision humaine %s sans modifier le statut technique",
+    (status) => {
+      const run = createExperimentRun({
+        id: `run-${status}`,
+        experimentId: "experiment-1",
+        testCaseId: "case-1",
+        technicalStatus: "completed",
+      });
+      const reviewed = recordHumanReview(run, {
+        status,
+        reviewer: "reviewer-1",
+        reviewedAt: "2026-10-05T11:00:00.000Z",
+      });
+      expect(reviewed.technicalStatus).toBe("completed");
+      expect(reviewed.humanReviewStatus).toBe(status);
+    },
+  );
+
+  it("refuse pending_review comme nouvelle decision humaine", () => {
+    const run = createExperimentRun({ id: "run-1", experimentId: "experiment-1", testCaseId: "case-1" });
+    expect(() => parseHumanDecisionStatus("pending_review")).toThrow(/unknown HumanDecisionStatus/);
+    expect(() => recordHumanReview(run, {
+      status: "pending_review" as never,
       reviewer: "reviewer-1",
       reviewedAt: "2026-10-05T11:00:00.000Z",
-      comment: "Revue humaine terminee.",
-    });
-    expect(reviewed.technicalStatus).toBe("completed");
-    expect(reviewed.humanReviewStatus).toBe("approved");
+    })).toThrow(/unknown HumanDecisionStatus/);
   });
 
   it("exige toujours un target explicite sans consulter cwd ou le repository du Lab", () => {
@@ -159,22 +180,64 @@ describe("Experiment domain foundation", () => {
     }
   });
 
-  it("conserve Evidence factuelle et refuse les champs de verdict", () => {
-    expect(createEvidence({
-      type: "duration",
-      recordedAt: "2026-10-05T10:00:00.000Z",
-      source: "runner",
-      metric: { name: "duration", value: 42, unit: "ms" },
-      data: { exitCode: 0, tests: { passed: 1, failed: 0 } },
-    }).metric?.value).toBe(42);
+  it.each(["failedTests", "duration", "exitCode", "tokenCount"])(
+    "accepte la metrique objective %s",
+    (name) => {
+      expect(createEvidence({
+        type: "test-result",
+        recordedAt: "2026-10-05T10:00:00.000Z",
+        source: "runner",
+        metric: { name, value: 42 },
+        data: { passedTests: 1, changedFiles: 0, status: "completed" },
+      }).metric?.name).toBe(name);
+    },
+  );
 
+  it.each(["approved", "winner"])("refuse le verdict %s dans Evidence.type", (type) => {
     expect(() => createEvidence({
-      type: "judge",
+      type,
       recordedAt: "2026-10-05T10:00:00.000Z",
       source: "automation",
-      data: { winner: "treatment" },
     })).toThrow(/verdict, not evidence/);
   });
+
+  it.each(["betterPrompt", "better_prompt", "Better-Prompt"])(
+    "normalise et refuse %s dans Evidence.metric.name",
+    (name) => {
+      expect(() => createEvidence({
+        type: "metric",
+        recordedAt: "2026-10-05T10:00:00.000Z",
+        source: "automation",
+        metric: { name, value: 1 },
+      })).toThrow(/verdict, not evidence/);
+    },
+  );
+
+  it("refuse les cles de verdict imbriquees dans Evidence.data", () => {
+    expect(() => createEvidence({
+      type: "comparison-fact",
+      recordedAt: "2026-10-05T10:00:00.000Z",
+      source: "automation",
+      data: { result: { winner: "treatment" } },
+    })).toThrow(/verdict, not evidence/);
+  });
+
+  it.each([
+    ["status", "approved"],
+    ["review", "rejected"],
+    ["status", "uncertain"],
+    ["human", "pending_review"],
+  ])(
+    "refuse %s=%s comme valeur Evidence structuree",
+    (field, status) => {
+      expect(() => createEvidence({
+        type: "structured-fact",
+        recordedAt: "2026-10-05T10:00:00.000Z",
+        source: "automation",
+        data: { result: { [field]: status } },
+      })).toThrow(/human review status, not evidence/);
+    },
+  );
 
   it("effectue un round-trip JSON stable avec discriminants et validation runtime", () => {
     const experiment = parseExperimentJson(fixtureJson);

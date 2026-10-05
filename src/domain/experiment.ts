@@ -17,6 +17,10 @@ export const HUMAN_REVIEW_STATUSES = [
 
 export type HumanReviewStatus = (typeof HUMAN_REVIEW_STATUSES)[number];
 
+export const HUMAN_DECISION_STATUSES = ["approved", "rejected", "uncertain"] as const;
+
+export type HumanDecisionStatus = Exclude<HumanReviewStatus, "pending_review">;
+
 export const HUMAN_REVIEW_LABELS: Readonly<Record<HumanReviewStatus, string>> = {
   pending_review: "À vérifier",
   approved: "Validé",
@@ -148,7 +152,7 @@ export interface TechnicalRunUpdate {
 }
 
 export interface HumanReviewInput {
-  readonly status: HumanReviewStatus;
+  readonly status: HumanDecisionStatus;
   readonly reviewer: string;
   readonly reviewedAt: string;
   readonly comment?: string;
@@ -235,18 +239,72 @@ function copyJsonValue(value: unknown, path: string): JsonValue {
   );
 }
 
-const FORBIDDEN_EVIDENCE_KEYS = new Set(["iscorrect", "winner", "betterprompt", "approved"]);
+const FORBIDDEN_EVIDENCE_LABELS = new Set([
+  "approved",
+  "valide",
+  "validated",
+  "rejected",
+  "refuse",
+  "uncertain",
+  "incertain",
+  "pendingreview",
+  "averifier",
+  "winner",
+  "promptwinner",
+  "bestprompt",
+  "betterprompt",
+  "worseprompt",
+  "iscorrect",
+  "correct",
+  "incorrect",
+  "verdict",
+  "decision",
+  "humanreviewstatus",
+  "reviewstatus",
+]);
+
+const FORBIDDEN_EVIDENCE_VALUES = new Set([
+  "approved",
+  "valide",
+  "validated",
+  "rejected",
+  "refuse",
+  "uncertain",
+  "incertain",
+  "pendingreview",
+  "averifier",
+]);
+
+function normalizeEvidenceLabel(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function assertFactualEvidenceLabel(value: unknown, path: string): string {
+  const label = nonEmptyString(value, path);
+  if (FORBIDDEN_EVIDENCE_LABELS.has(normalizeEvidenceLabel(label))) {
+    throw new TypeError(`${path} is a verdict, not evidence`);
+  }
+  return label;
+}
 
 function assertNoVerdictFields(value: JsonValue, path: string): void {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertNoVerdictFields(entry, `${path}[${index}]`));
     return;
   }
+  if (typeof value === "string") {
+    if (FORBIDDEN_EVIDENCE_VALUES.has(normalizeEvidenceLabel(value))) {
+      throw new TypeError(`${path} contains a human review status, not evidence`);
+    }
+    return;
+  }
   if (typeof value !== "object" || value === null) return;
   for (const [key, entry] of Object.entries(value)) {
-    if (FORBIDDEN_EVIDENCE_KEYS.has(key.toLowerCase())) {
-      throw new TypeError(`${path}.${key} is a verdict, not evidence`);
-    }
+    assertFactualEvidenceLabel(key, `${path}.${key}`);
     assertNoVerdictFields(entry, `${path}.${key}`);
   }
 }
@@ -263,6 +321,13 @@ export function parseHumanReviewStatus(value: unknown): HumanReviewStatus {
     throw new TypeError(`unknown HumanReviewStatus: ${String(value)}`);
   }
   return value as HumanReviewStatus;
+}
+
+export function parseHumanDecisionStatus(value: unknown): HumanDecisionStatus {
+  if (typeof value !== "string" || !HUMAN_DECISION_STATUSES.includes(value as HumanDecisionStatus)) {
+    throw new TypeError(`unknown HumanDecisionStatus: ${String(value)}`);
+  }
+  return value as HumanDecisionStatus;
 }
 
 export function createTargetRef(value: unknown): TargetRef {
@@ -364,7 +429,7 @@ export function createEvidence(value: unknown): Evidence {
     "evidence",
   );
   const output: UnknownRecord = {
-    type: nonEmptyString(input.type, "evidence.type"),
+    type: assertFactualEvidenceLabel(input.type, "evidence.type"),
     recordedAt: isoTimestamp(input.recordedAt, "evidence.recordedAt"),
     source: nonEmptyString(input.source, "evidence.source"),
   };
@@ -377,7 +442,7 @@ export function createEvidence(value: unknown): Evidence {
       throw new TypeError("evidence.metric.value must be a finite number");
     }
     output.metric = optionalField(
-      { name: nonEmptyString(metric.name, "evidence.metric.name"), value: metric.value },
+      { name: assertFactualEvidenceLabel(metric.name, "evidence.metric.name"), value: metric.value },
       "unit",
       optionalString(metric.unit, "evidence.metric.unit"),
     );
@@ -463,7 +528,7 @@ export function updateRunTechnicalState(run: ExperimentRun, update: TechnicalRun
 export function recordHumanReview(run: ExperimentRun, review: HumanReviewInput): ExperimentRun {
   return parseExperimentRun({
     ...run,
-    humanReviewStatus: review.status,
+    humanReviewStatus: parseHumanDecisionStatus(review.status),
     reviewer: review.reviewer,
     reviewedAt: review.reviewedAt,
     ...(review.comment === undefined ? {} : { reviewComment: review.comment }),

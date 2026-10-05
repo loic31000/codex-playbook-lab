@@ -2,157 +2,344 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Node.js-20%2B-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js 20+">
-  <img src="https://img.shields.io/badge/PowerShell-5.1-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell 5.1">
-  <img src="https://img.shields.io/badge/Bash-Linux%20%2F%20macOS-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white" alt="Bash">
-  <img src="https://img.shields.io/badge/Docker-supported-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript strict">
+  <img src="https://img.shields.io/badge/Docker-required%20for%20strict%20runner-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/Codex%20CLI-0.160.0-000000?style=for-the-badge" alt="Codex CLI 0.160.0">
-  <img src="https://img.shields.io/badge/Prompts-114-6f42c1?style=for-the-badge" alt="114 prompts">
+  <img src="https://img.shields.io/badge/V2-in%20progress-orange?style=for-the-badge" alt="V2 in progress">
 </p>
 
-Codex Playbook Lab compare, prompt par prompt, le comportement de Codex sans consigne spécialisée (baseline) puis avec les prompts du playbook français. Le moteur est commun à Windows, Linux/macOS et Docker : toute la logique métier vit dans `src/`, en Node.js standard.
+> **Branche V2.** Ce document décrit l'architecture en cours sur `v2/lab-architecture`.  
+> `main` reste la version stable historique jusqu'au cutover final.
+
+Codex Playbook Lab est une couche d'expérimentation **evidence-first** pour mesurer l'effet de playbooks/prompts sur de vrais agents Codex, avec cas fixes et exploratoires, exécutions A/B isolées, preuves factuelles et décision finale explicitement humaine.
 
 ## Projet associé
 
-Ce dépôt est le laboratoire de test et de validation du projet [Codex Engineering Playbook FR](https://github.com/loic31000/codex-engineering-playbook-fr). Le playbook contient les prompts à évaluer ; Codex Playbook Lab les découvre, les exécute en comparaison baseline/avec prompt, puis conserve les résultats et validations.
+Ce dépôt est le laboratoire du projet [Codex Engineering Playbook FR](https://github.com/loic31000/codex-engineering-playbook-fr).
 
-## Architecture
+Le playbook fournit les prompts à évaluer. Le Lab organise les expériences, exécute les agents dans une frontière contrôlée, conserve les preuves techniques et présente les résultats à un reviewer humain.
 
-- `src/cli.mjs` : commandes et menu communs ;
-- `src/core/` : découverte, exécution Codex, reprise, résultats et validations ;
-- `src/platform/` : arrêt ciblé des arbres de processus Windows/POSIX ;
-- `bin/` : façades PowerShell 5.1 et Bash très fines ;
-- `docker/` et `compose.yaml` : même moteur dans un conteneur ;
-- scripts `.ps1` à la racine : compatibilité temporaire avec l’ancien usage.
+## Invariant central
 
-Les résultats restent hors du dépôt, par défaut dans le sibling `../codex-playbook-test-runs`. Le playbook attendu par défaut est `../codex-engineering-playbook-fr`.
+Le système automatique **ne décide jamais** qu'un prompt est meilleur, qu'une réponse est qualitativement correcte ou qu'un run doit être validé/refusé.
 
-## Prérequis
+Il peut enregistrer des faits :
 
-- Node.js 20 ou plus récent ;
+- exit code ;
+- durée ;
+- tests ;
+- TypeScript ;
+- diff ;
+- fichiers modifiés ;
+- fingerprints ;
+- événements observés ;
+- erreurs techniques.
+
+La décision finale appartient à un humain avec les états :
+
+- **À vérifier** ;
+- **Validé** ;
+- **Refusé** ;
+- **Incertain**.
+
+Dans le domaine V2, `TechnicalStatus` et `HumanReviewStatus` sont volontairement séparés.
+
+Un run peut donc être :
+
+```text
+technicalStatus = completed
+humanReviewStatus = pending_review
+```
+
+sans contradiction.
+
+## État actuel de la V2
+
+| Étape | État |
+| --- | --- |
+| Architecture native Codex / isolation | ✅ validée par #37 et #39 |
+| Domaine Experiment / Evidence / revue humaine (#23) | ✅ mergé via #40 |
+| Strict runner production (#24) | 🚧 en cours |
+| Benchmarks fixes (#25) | à venir |
+| Cas exploratoires générés (#26) | à venir |
+| Orchestration d'expériences (#27) | à venir |
+| Evidence persistée / reprise (#28) | à venir |
+| Revue humaine / promotion (#29) | à venir |
+| Rapport factuel (#30) | à venir |
+| Couche applicative / CLI (#31) | à venir |
+| API / événements (#32) | à venir |
+| GUI (#33) | à venir |
+| CI / campagne finale / cutover (#34) | à venir |
+
+La roadmap de référence est l'issue #22.
+
+## Architecture d'exécution validée
+
+La phase d'exploration du runner a abouti à l'architecture suivante :
+
+```text
+trusted host
+ChatGPT OAuth
+    │
+    ▼
+Codex app-server
+    │
+    │ private inherited stdio
+    ▼
+docker run --network none
+    │
+    ▼
+Codex exec-server
+    │
+    ▼
+target-only /workspace
+```
+
+Cette architecture a été validée par une campagne réelle avec :
+
+- Codex CLI `0.160.0` ;
+- Docker `29.6.2` ;
+- Windows 10 / Docker Desktop pour la plateforme de preuve.
+
+Les propriétés démontrées comprennent :
+
+- vraie inférence via le plan ChatGPT sans `OPENAI_API_KEY` dans le sandbox ;
+- authentification ChatGPT conservée côté host ;
+- aucun credential ChatGPT dans le container agent ;
+- aucun Docker socket ;
+- aucun port publié ;
+- `--network none` ;
+- aucun accès utile au host ou à Internet dans le sandbox testé ;
+- target lisible et modifiable dans `/workspace` ;
+- Lab, home host, auth et sentinelles inaccessibles ;
+- routage objectif des opérations dans l'environnement distant ;
+- workspaces A/B indépendants à état initial identique.
+
+### Portée de cette preuve
+
+Ce résultat ne constitue pas une garantie universelle pour toutes les plateformes ou futures versions de Codex.
+
+Toute évolution de la frontière d'exécution ou de la version Codex doit être revalidée.
+
+L'issue #24 transforme actuellement cette preuve en **runner production réutilisable**. Le code de production ne doit pas dépendre des fichiers du spike.
+
+## Modèle métier V2
+
+La fondation mergée dans `src/domain/` introduit notamment :
+
+- `Experiment` ;
+- `PromptDefinition` ;
+- `PromptVersion` ;
+- `TargetRef` ;
+- `TestCase` ;
+- `FixedCase` ;
+- `GeneratedCase` ;
+- `GenerationProvenance` ;
+- `ExperimentRun` ;
+- `Evidence` ;
+- `TechnicalStatus` ;
+- `HumanReviewStatus`.
+
+### Target explicite
+
+Le repository du Lab n'est jamais un target implicite.
+
+Un target doit être fourni explicitement par l'appelant. Le futur strict runner doit travailler sur un snapshot indépendant : le dépôt source ne doit pas être modifié par l'agent.
+
+### FixedCase et GeneratedCase
+
+Les deux variantes partagent un contrat `TestCase`.
+
+Un `GeneratedCase` conserve obligatoirement sa provenance. La promotion d'un cas généré en benchmark fixe est une décision humaine et sera traitée dans une étape dédiée.
+
+### Evidence factuelle
+
+`Evidence` accepte des informations factuelles et refuse les concepts de verdict qualitatif tels que `winner`, `betterPrompt`, `approved`, `rejected`, etc.
+
+Principe :
+
+> Les faits techniques appartiennent à Evidence ; la décision appartient à HumanReviewStatus.
+
+## Structure du repository
+
+Les zones importantes pendant la migration V2 sont :
+
+```text
+src/
+├── domain/                 # domaine V2 déjà intégré
+├── core/                   # moteur historique V1, conservé jusqu'au cutover
+├── platform/               # helpers plateforme historiques
+└── runner/                 # futur strict runner (#24), en cours de construction
+
+spikes/
+└── codex-app-exec/         # preuve historique de l'architecture native retenue
+
+tests/
+├── domain/                 # tests du domaine V2
+└── lab/                    # tests moteur / spikes / non-régression
+```
+
+Le spike Inspect AI / inspect-swe a été évalué dans #35/#36 mais **n'a pas été intégré comme fondation du runner V2**.
+
+Les dossiers `spikes/` sont des preuves historiques. Le runtime production ne doit pas les importer.
+
+## Langages et responsabilités
+
+La cible V2 est volontairement simple :
+
+- **TypeScript / Node.js** : domaine, application, runner, evidence, CLI/API ;
+- **Bash** : seulement un éventuel bootstrap Linux/container très mince ;
+- **PowerShell** : compatibilité/outillage Windows, pas logique métier V2 ;
+- **Python** : aucune nouvelle dépendance de production prévue.
+
+La présence de plusieurs langages dans les expériences historiques ne signifie pas que la production V2 repose sur plusieurs couches métier.
+
+La direction recherchée est :
+
+```text
+TypeScript / Node
+      │
+      ▼
+    Docker
+      │
+      ▼
+small container bootstrap
+      │
+      ▼
+Codex exec-server
+```
+
+## Threat model du strict runner
+
+Le container agent est traité comme potentiellement hostile.
+
+Le strict runner doit garantir que l'agent ne reçoit pas :
+
+- le repository du Lab ;
+- les benchmarks/oracles du Lab ;
+- le home du host ;
+- `auth.json` ;
+- les tokens OAuth ;
+- une API key ;
+- le Docker socket ;
+- les résultats d'autres runs ;
+- un accès réseau général au host ou à Internet.
+
+Le workspace autorisé doit être un volume/snapshot indépendant monté sur :
+
+```text
+/workspace
+```
+
+Le dépôt source host ne doit jamais être nettoyé ou réinitialisé pour restaurer un run.
+
+## A/B
+
+BASELINE et AVEC PROMPT doivent commencer depuis le **même état initial vérifiable**, dans deux workspaces indépendants.
+
+La future orchestration doit pouvoir établir factuellement :
+
+```text
+baseline.initialFingerprint
+===
+treatment.initialFingerprint
+```
+
+avant l'exécution.
+
+Aucune égalité de résultat ou supériorité qualitative n'est déduite automatiquement de ces faits.
+
+## Développement
+
+Prérequis généraux :
+
+- Node.js 20+ ;
 - npm ;
 - Git ;
-- Codex CLI installé et authentifié ;
-- le dépôt du playbook placé à côté de celui-ci, sauf surcharge de configuration.
+- Docker pour les tests/intégrations du strict runner ;
+- Codex CLI authentifié côté host pour les campagnes réelles.
 
-Le moteur n’ajoute aucune dépendance npm. Les dépendances déjà présentes servent uniquement à l’application TypeScript testée par le banc.
-
-## Démarrage
-
-Windows PowerShell 5.1 :
-
-```powershell
-.\bin\codex-lab.ps1
-.\bin\codex-lab.ps1 check
-```
-
-Linux/macOS :
+Installation :
 
 ```bash
-chmod +x bin/*.sh docker/entrypoint.sh
-./bin/codex-lab.sh
-./bin/codex-lab.sh check
+npm install
 ```
 
-Le menu commun propose la suite complète, un prompt, la reprise, le diagnostic, la lecture et le nettoyage des résultats.
-
-## Commandes non interactives
-
-```text
-codex-lab check [--docker]
-codex-lab list
-codex-lab test <id-ou-chemin>
-codex-lab test <id> --select-only
-codex-lab suite [--prompt <id-ou-chemin>]
-codex-lab benchmark [<id-benchmark-ou-id-prompt>]
-codex-lab resume
-codex-lab results
-codex-lab clean --yes
-```
-
-Exemples :
-
-```powershell
-.\bin\codex-lab.ps1 test 09-01-implementer-story
-.\bin\codex-lab.ps1 benchmark 09-01-implementer-story--benchmark-002-priorite-ambiguite
-.\bin\codex-lab.ps1 benchmark 09-01-implementer-story
-.\bin\run-suite.ps1 --prompt 09-01-implementer-story
-```
-
-Une sélection ambiguë est refusée. `test` sans argument affiche la liste humaine et ne demande jamais un hash.
-
-## Configuration
-
-`tests-suite.json` accepte `playbook_path`, `cases_per_prompt` et l’option `benchmarks_path`. Cette dernière désigne le dossier de benchmarks versionnés et reste facultative. Ces variables surchargent les chemins sans être obligatoires :
-
-- `CODEX_LAB_PLAYBOOK_DIR`
-- `CODEX_LAB_RESULTS_DIR`
-
-Les chemins relatifs sont résolus depuis la racine du dépôt de test.
-
-## Cas générés et benchmarks fixes
-
-Les cas générés sont créés à partir du prompt et servent à l’exploration ; ils peuvent varier entre deux générations. La commande `test` conserve ce fonctionnement et `cases_per_prompt` reste supporté.
-
-Les benchmarks fixes vivent dans `benchmarks/`. Ils sont versionnés, reproductibles et n’ajoutent aucun appel Codex pour générer le cas. Leur frontmatter reste conservé dans `case.md` comme métadonnée d’artefact, mais seul le corps Markdown est envoyé aux runs BASELINE et AVEC PROMPT. Leur fingerprint dépend du fichier benchmark et du prompt testé. Une modification archive donc les anciens résultats selon les garde-fous existants, sans les supprimer.
-
-Les trois premiers benchmarks ciblent `09-01-implementer-story` : ajout d’une tâche, ajout d’une priorité et liste des tâches. Le benchmark priorité attend une clarification sans modification, car les valeurs autorisées et la valeur par défaut constituent des décisions métier volontairement absentes. Ce résultat reste soumis à une appréciation humaine ; aucune notation automatique ni appel LLM juge n’est effectué.
-
-## Flux et résultats
-
-Chaque test suit strictement : CAS → BASELINE → VALIDATION → AVEC PROMPT → VALIDATION → COMPARAISON. Un run valide est réutilisé lors d’une reprise. Les anciens dossiers `auto-*` sont migrés sans écrasement ; un fingerprint différent archive l’ancien dossier sous `_archive/`.
-
-Les runs Codex utilisent explicitement le sandbox `workspace-write`. Si Codex signale malgré cela que le workspace est en lecture seule et qu’aucune modification n’a été produite, le run est invalidé et sera rejoué lors d’une reprise. Sous Windows natif, Docker/Linux constitue la solution de repli si le sandbox refuse encore l’écriture.
-
-Chaque dossier lisible contient notamment `fingerprint.txt`, `case.md`, `result.md`, `diff.patch`, `base/` et `prompt/`. Un cas généré possède aussi `generation.log` ; un benchmark fixe n’en a pas besoin puisqu’aucune génération de cas n’est effectuée. Les sous-dossiers de run conservent l’entrée, la sortie finale, stdout, stderr, le log combiné, le statut structuré, le diff, les fichiers modifiés et les sorties de validation. Leur `state-manifest.json` associe explicitement chaque chemin au statut `added`, `modified` ou `deleted` et au commit de référence commun utilisé pour reconstruire la comparaison A/B.
-
-`diff.patch` représente exclusivement la transformation **BASELINE → AVEC PROMPT**. Ses headers utilisent des chemins relatifs portables comme `a/src/task.ts` et `b/src/task.ts` ; il ne représente pas nécessairement une transformation de `HEAD` vers un résultat.
-
-Un run moderne n’est réutilisable que si Codex a réussi, si `git diff --check` passe et si les tests et TypeScript sont soit réussis, soit explicitement classés comme limitation d’environnement. `case.md`, les deux runs valides, `diff.patch` et `result.md` sont tous requis pour considérer un test terminé. Les anciens runs PowerShell dépourvus de `codex-status.json` et `summary.json` conservent un fallback documenté ; un run Node incomplet ne bénéficie pas de cette tolérance.
-
-Après chaque run, le moteur exécute :
-
-```text
-npm test -- --run
-npx tsc --noEmit
-git --no-pager diff --check
-git --no-pager reset --hard HEAD
-git --no-pager clean -fd
-```
-
-## Sécurité Git
-
-Un run réel est refusé si le dépôt contient une modification ou un fichier non suivi. Cela protège à la fois le travail utilisateur et le moteur contre `reset --hard` / `clean -fd`. Il faut donc faire revoir puis versionner l’infrastructure avant son premier run réel. `check` se contente d’un warning et n’appelle aucun modèle.
-
-`clean` ne cible que le dossier de résultats configuré. En interactif il exige le mot `SUPPRIMER`; en non interactif il exige `--yes`.
-
-## Docker
-
-```bash
-docker compose run --rm codex-lab check
-docker compose run --rm codex-lab test 09-01-implementer-story
-```
-
-Compose monte le dépôt Git, le playbook en lecture seule et les résultats persistants. La version de Codex CLI est fixée à `0.160.0` via `CODEX_VERSION`, un argument de build facile à modifier.
-
-Pour une exécution automatisée, fournissez la clé uniquement au runtime :
-
-```bash
-export OPENAI_API_KEY='...'
-docker compose run --rm codex-lab check
-```
-
-L’entrypoint transmet la clé à la commande officielle `codex login --with-api-key`; elle n’est jamais copiée dans l’image ni dans le dépôt. Pour un login ChatGPT existant, créez un override Compose privé qui monte votre `CODEX_HOME` dans le conteneur, sans jamais committer `auth.json`. `check` n’effectue aucun appel de modèle et ne nécessite pas d’authentification.
-
-## Compatibilité
-
-`codex-lab.ps1`, `run-suite.ps1`, `run-test.ps1` et `save-run.ps1` restent à la racine comme redirections fines. Les nouvelles commandes recommandées sont celles de `bin/`.
-
-Sous Windows, le moteur résout d’abord un exécutable Codex natif. À défaut, il exécute précisément le shim `codex.cmd` via `cmd.exe`, avec des arguments cités, sans activer `shell: true` globalement.
-
-## Tests du moteur
+Validation principale :
 
 ```bash
 npm run test:lab
+npm test -- --run
+npx tsc --noEmit
+git diff --check
 ```
 
-Ces tests utilisent des fixtures et des processus factices ; ils ne consomment aucun quota Codex.
+Les tests automatisés normaux ne doivent pas nécessiter de vraie inférence modèle.
+
+## CLI historique
+
+Le repository contient encore la CLI et les scripts de la V1 pendant la migration.
+
+Ils restent utiles pour la version historique, mais **ils ne constituent pas la frontière de sécurité retenue pour la V2**.
+
+En particulier, les anciennes stratégies basées sur `workspace-write`, bind mounts du dépôt, `git reset --hard` ou `git clean` ne doivent pas être reprises dans le strict runner V2.
+
+Pour la documentation du produit stable actuel, consulter le README de `main`.
+
+## Authentification
+
+La V2 retenue utilise l'authentification ChatGPT côté host avec Codex app-server.
+
+Le sandbox agent ne doit recevoir ni :
+
+- access token ;
+- refresh token ;
+- id token ;
+- `OPENAI_API_KEY` ;
+- `auth.json`.
+
+Ne montez pas `CODEX_HOME` ou des credentials host dans le container agent.
+
+## Réseau
+
+La frontière validée utilise :
+
+```text
+docker run --network none
+```
+
+Le control plane ne dépend pas du réseau du container : il passe par le flux stdio privé hérité entre le host et `exec-server`.
+
+C'est précisément ce découplage qui permet de conserver le contrôle de l'agent sans lui donner un data plane réseau.
+
+## Workflow Git V2
+
+- `main` reste stable jusqu'au cutover ;
+- `v2/lab-architecture` est la branche d'intégration ;
+- une issue active = une branche dédiée ;
+- les branches partent du dernier `v2/lab-architecture` ;
+- les PR V2 ciblent `v2/lab-architecture` ;
+- aucun merge sans revue et accord humain explicite ;
+- une branche terminée ou abandonnée peut être supprimée une fois sa traçabilité conservée par les PR/issues.
+
+## Historique des décisions
+
+- #35 / #36 — Inspect AI / inspect-swe : **partiellement suffisant, voie non retenue dans le chemin critique** ;
+- #37 — Codex app-server / exec-server natif : **base retenue sous condition d'isolation réseau** ;
+- #38 / #39 — stdio + `--network none` : **H2-A — PASS** ;
+- #23 / #40 — domaine Experiment / Evidence / human review : **intégré** ;
+- #24 — strict runner production : **en cours**.
+
+Les spikes restent consultables pour comprendre les preuves, mais ils ne définissent pas l'API production.
+
+## Principe de livraison
+
+Chaque issue V2 doit fournir :
+
+- critères d'acceptation explicites ;
+- tests ;
+- preuves vérifiables ;
+- limites connues ;
+- revue humaine avant merge.
+
+Une déclaration d'un agent n'est jamais suffisante à elle seule pour accepter une issue.

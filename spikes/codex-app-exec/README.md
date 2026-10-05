@@ -12,10 +12,11 @@ Windows (trusted)
   OAuth ChatGPT-plan + DPAPI
   codex app-server
            |
-           | JSON-RPC environment/add, WebSocket loopback
+           | private inherited stdio pipe (host-initiated docker run -i)
            v
 Docker Linux (untrusted)
-  codex exec-server
+  --network none
+  codex exec-server --listen stdio
   volume nommé /workspace (fixture uniquement)
 ```
 
@@ -23,6 +24,12 @@ Le contexte de build Docker temporaire ne contient que le Dockerfile,
 l'entrypoint et la fixture. À l'exécution, le conteneur reçoit un unique volume
 nommé sur `/workspace`. Aucun bind mount, home hôte, `.codex`, `auth.json`,
 credential, dépôt Lab ou socket Docker n'est monté.
+
+Le conteneur n'expose aucun listener ni port. `app-server` initie le canal en
+lançant `docker run --interactive`; les messages exec-server circulent
+uniquement sur les pipes stdin/stdout hérités du processus Docker côté host.
+Le credential ChatGPT reste exclusivement dans le processus `app-server` de
+confiance et n'est pas transmis au processus Docker.
 
 ## Reproduction
 
@@ -61,15 +68,16 @@ Ce résumé commit-able utilise une allowlist et refuse tout credential connu.
   `chatgpt.tokens.use.direct` accordés, aucune API key utilisée.
 - Inference `openai_chatgpt_plan` via `app-server` : réponse attendue reçue,
   statut `completed`.
-- Primitive distante : `environment/add` vers le WebSocket loopback publié par
-  `exec-server`, cwd retourné `file:///workspace`.
-- Le listener `exec-server` exige un capability-token aléatoire éphémère. Seul
-  son SHA-256 est fourni au conteneur ; le token est transmis par le champ
-  officiel `authBearerToken` de `environment/add`. Une connexion sans token est
-  refusée.
+- Primitive distante : environnement statique Codex `0.160.0` lançant
+  `exec-server --listen stdio` dans `docker run --network none`; cwd retourné
+  `file:///workspace`.
+- Canal de contrôle : aucun WebSocket, listener ou port publié. Le
+  capability-token WebSocket devient sans objet parce qu'aucune surface réseau
+  exec-server n'existe dans cette variante.
 - Routage : lecture, shell, création, modification, suppression, file change
-  (`apply_patch`), Git et tests observés dans le conteneur ; le snapshot Git du
-  Lab est resté identique avant/après.
+  (`apply_patch`), Git et tests sont 8/8 `SANDBOX`. Chaque conclusion provient
+  des événements persistés (thread/turn, environnement attribué, commande,
+  cwd, statut, exit code ou changements de fichiers), jamais du texte agent.
 - Probe déterministe : target lisible/inscriptible ; aucune sentinel Lab/OAuth,
   aucun contenu de sentinel, `auth.json`, secret d'environnement, home hôte ou
   socket Docker visible.
@@ -83,34 +91,37 @@ Ce résumé commit-able utilise une allowlist et refuse tout credential connu.
   modèle `gpt-6.1-sol`, effort `medium`, Codex `0.160.0`. Les deux bras ont
   produit le même diff minimal et un test vert. Seul le traitement recevait
   l'instruction additionnelle déterministe.
+- Réseau : `networkMode=none`, aucun port publié, seule interface `lo`, aucune
+  route IPv4/IPv6 externe. `host.docker.internal`,
+  `gateway.docker.internal`, le serveur HTTP factice host, le DNS externe,
+  TCP 443, HTTP et HTTPS sont bloqués. Les probes Internet couvrent
+  `example.com` et `www.iana.org`.
 
 ### Décision
 
-**DECISION B — Codex natif retenu comme base sous condition de durcissement
-réseau.**
+**H2-A — PASS.**
 
-La frontière OAuth/filesystem est prouvée pour ce run. L'isolation réseau
-Docker est une propriété distincte et n'est pas fournie par cette configuration.
-Un target peut lui-même contenir des données confidentielles : l'egress est donc
-un risque même quand aucun credential du Lab n'entre dans le conteneur.
+Le control plane, l'isolation réseau, la frontière OAuth/filesystem, le routage
+objectif 8/8, la tâche réelle et le mini A/B sont prouvés pour ce run. Cette
+conclusion est limitée à Codex `0.160.0`, Docker Desktop `29.6.2` et aux probes
+documentées dans `RESULT.md`.
 
 ## Limites observées
 
-- L'API `environment/add` et le champ `environments` sont expérimentaux. Codex
+- Le champ `environments` et `exec-server` sont expérimentaux. Codex
   `0.160.0` est l'unique version validée ; le runner refuse toute autre version
   et une mise à jour exige une nouvelle validation complète du routage.
-- Le réseau Docker dédié n'est pas `--internal` : Docker Desktop ne publiait
-  alors pas le port loopback nécessaire. La probe renforcée a résolu
-  `host.docker.internal` et `gateway.docker.internal`, atteint un serveur HTTP
-  factice sur le host et obtenu une réponse d'`example.com`. Conclusion réseau :
-  **FAIL / NOT PROVIDED**.
+- Option 1 réfutée sur ce host : un réseau Docker `--internal` ne publiait pas
+  le port exec-server. L'option retenue utilise le transport stdio natif et
+  `--network none`, sans proxy, firewall, VPN ou daemon custom.
+- Le sandbox ne peut accéder à aucun registre de paquets ou autre service
+  réseau. Une tâche nécessitant réellement le réseau demande une policy
+  distincte et n'est pas couverte par H2-A.
 - `app-server` émet des avertissements de conversion de chemins Windows pour
   ses recherches de plugins (`C:\workspace`) alors que les outils distants ont
   bien opéré dans `/workspace`.
 - Le warm-up optionnel des plugins côté host a rencontré un `401`, un chemin
   Windows trop long et un `429`; ces erreurs n'ont pas affecté les tours.
-- Le premier essai `apply_patch` de l'agent était invalide, puis sa seconde
-  tentative a réussi dans le target.
 - Le stockage DPAPI et le flow navigateur sont Windows-only dans ce spike.
 - Une seule répétition A/B a été exécutée ; aucun mérite relatif des prompts
   n'en est déduit.

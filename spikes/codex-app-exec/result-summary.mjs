@@ -55,19 +55,37 @@ function completedWorkspaceCommands(run) {
 
 function hasCommand(run, predicate, { successful = false } = {}) {
   return completedWorkspaceCommands(run).some((event) => (
-    (!successful || event.item.exitCode === 0) && predicate(event.item.command.trim())
+    (!successful || event.item.exitCode === 0) && predicate(commandPayload(event.item.command))
   ));
 }
 
-function hasCompletedFileChange(run) {
+function commandPayload(command) {
+  const trimmed = command.trim();
+  const wrapped = trimmed.match(/^\/bin\/sh\s+-lc\s+(['"])([\s\S]*)\1$/);
+  if (wrapped) return wrapped[2];
+  const unquoted = trimmed.match(/^\/bin\/sh\s+-lc\s+([^'"\s][\s\S]*)$/);
+  return unquoted ? unquoted[1] : trimmed;
+}
+
+function normalizedWorkspacePath(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replaceAll('\\', '/').replace(/^\.\//, '');
+  if (normalized.startsWith('/workspace/')) return normalized.slice('/workspace/'.length);
+  if (!normalized.startsWith('/')) return normalized;
+  return null;
+}
+
+function completedFileChangeKinds(run, file) {
   const environmentId = expectedEnvironmentId(run);
-  if (!environmentId) return false;
-  return (run.eventSummary ?? []).some((event) => (
+  if (!environmentId) return [];
+  return (run.eventSummary ?? []).filter((event) => (
     event.method === 'item/completed'
     && event.environmentId === environmentId
     && event.item?.type === 'fileChange'
     && event.item?.status === 'completed'
-  ));
+  )).flatMap((event) => event.item?.changes ?? [])
+    .filter((change) => normalizedWorkspacePath(change.path) === file)
+    .map((change) => change.kind);
 }
 
 function finalStateHas(run, file, status) {
@@ -79,25 +97,39 @@ function finalStateHas(run, file, status) {
 export function routingSummary(run) {
   const reported = run.routing ?? {};
   const sandbox = (value) => value ? 'SANDBOX' : 'NOT PROVEN';
-  const fileChange = hasCompletedFileChange(run);
   return {
     read: sandbox(hasCommand(run, (command) => (
       /^(?:cat|head|tail|less|more)\s+(?:--\s+)?(?:\.\/|\/workspace\/)?src\/math\.cjs$/.test(command)
       || /^sed\b.+\s(?:\.\/|\/workspace\/)?src\/math\.cjs$/.test(command)
     ), { successful: true })),
-    shell: sandbox(hasCommand(run, (command) => /^(?:\/bin\/)?pwd$/.test(command))),
-    create: sandbox(fileChange && reported.create === true
+    shell: sandbox(hasCommand(run, (command) => /^(?:\/bin\/)?pwd$/.test(command), { successful: true })),
+    create: sandbox(hasCommand(run, (command) => (
+      /^printf\b/.test(command)
+      && command.includes('created in sandbox')
+      && /(?:^|\s)(?:\.\/|\/workspace\/)?routing-created\.txt$/.test(command)
+    ), { successful: true }) && reported.create === true
       && finalStateHas(run, 'routing-created.txt', (status) => status === '??' || status.includes('A'))),
-    modify: sandbox(fileChange && reported.modify === true
+    modify: sandbox(hasCommand(run, (command) => (
+      /^printf\b/.test(command)
+      && command.includes('modified in sandbox')
+      && /(?:^|\s)(?:\.\/|\/workspace\/)?routing-modify\.txt$/.test(command)
+    ), { successful: true }) && reported.modify === true
       && finalStateHas(run, 'routing-modify.txt', (status) => status.includes('M'))),
-    delete: sandbox(fileChange && reported.delete === true
+    delete: sandbox(hasCommand(run, (command) => (
+      /^rm\s+(?:--\s+)?(?:\.\/|\/workspace\/)?routing-delete\.txt$/.test(command)
+    ), { successful: true }) && reported.delete === true
       && finalStateHas(run, 'routing-delete.txt', (status) => status.includes('D'))),
-    patch: sandbox(fileChange && reported.patch === true
+    patch: sandbox((() => {
+      const kinds = completedFileChangeKinds(run, 'routing-patch.txt');
+      return kinds.includes('update') || (kinds.includes('delete') && kinds.includes('add'));
+    })() && reported.patch === true
       && finalStateHas(run, 'routing-patch.txt', (status) => status.includes('M'))),
     git: sandbox(hasCommand(run, (command) => (
       /^git(?:\s+-C\s+(?:\/workspace|\.))?\s+status\s+--short$/.test(command)
-    ))),
-    tests: sandbox(hasCommand(run, (command) => /^npm\s+test$/.test(command))),
+    ), { successful: true })),
+    tests: sandbox(hasCommand(run, (command) => (
+      command === 'npm test' || command === 'npm test || test $? -eq 1'
+    ), { successful: true })),
   };
 }
 
@@ -118,17 +150,53 @@ function runSummary(run) {
     modifiedFiles: modifiedFiles(run.after?.status),
     diffSha256: sha256(run.after?.diff ?? ''),
     hostGitUnchanged: run.hostUnchanged === true,
+    securityPass: run.securityPass === true,
+    networkIsolationPass: run.networkIsolationPass === true,
   };
 }
 
 function networkSummary(network) {
+  const status = (value) => value === 'reachable' ? 'REACHABLE'
+    : value === 'blocked' ? 'BLOCKED' : 'NOT PROVEN';
+  const proof = (value) => value?.mechanism ?? value?.detail?.code ?? 'no_detail';
+  const publicProbes = Object.entries(network.publicDestinations ?? {});
+  const aggregate = (field) => {
+    const values = publicProbes.map(([, value]) => value[field]?.status);
+    const result = values.includes('reachable') ? 'REACHABLE'
+      : values.length && values.every((value) => value === 'blocked') ? 'BLOCKED'
+        : 'NOT PROVEN';
+    return {
+      result,
+      proof: publicProbes.map(([name, value]) => `${name}=${status(value[field]?.status)}`).join(', ') || 'no destinations',
+    };
+  };
   return {
-    hostDockerInternalResolution: network.dns?.hostDockerInternal?.status ?? 'not_proven',
-    gatewayDockerInternalResolution: network.dns?.gatewayDockerInternal?.status ?? 'not_proven',
-    hostHttp: network.hostHttp?.status ?? 'not_proven',
-    internet: network.internet?.status ?? 'not_proven',
-    dockerInternalNetwork: network.dockerNetwork?.internal === true,
-    routesObserved: network.routes?.status === 'reachable',
+    networkPolicy: {
+      result: network.policy?.networkMode === 'none' ? 'PASS' : 'FAIL',
+      proof: `networkMode=${network.policy?.networkMode ?? 'unknown'}; publishedPorts=${Object.keys(network.policy?.publishedPorts ?? {}).length}`,
+    },
+    hostDockerInternal: {
+      result: status(network.dns?.hostDockerInternal?.status),
+      proof: proof(network.dns?.hostDockerInternal),
+    },
+    gatewayDockerInternal: {
+      result: status(network.dns?.gatewayDockerInternal?.status),
+      proof: proof(network.dns?.gatewayDockerInternal),
+    },
+    hostTcp: { result: status(network.hostTcp?.status), proof: proof(network.hostTcp) },
+    fakeHostHttp: { result: status(network.hostHttp?.status), proof: proof(network.hostHttp) },
+    externalDns: aggregate('dns'),
+    internetTcp443: aggregate('tcp443'),
+    internetHttp: aggregate('http'),
+    internetHttps: aggregate('https'),
+    externalRoutes: {
+      result: status(network.routes?.status),
+      proof: network.routes?.mechanism ?? 'no route evidence',
+    },
+    nonLoopbackInterfaces: {
+      result: network.interfaces?.nonLoopback?.length === 0 ? 'BLOCKED' : 'REACHABLE',
+      proof: `interfaces=${network.interfaces?.names?.join(',') || 'unknown'}`,
+    },
   };
 }
 
@@ -147,6 +215,7 @@ export function buildSanitizedSummary(run, hardening, knownSecrets) {
     && baselineInitial.tree === treatmentInitial?.tree
     && baselineInitial.status === treatmentInitial?.status,
   );
+  const routing = routingSummary(run.routing);
   const summary = {
     date: expectString(run.routing?.timestamp, 'date du run'),
     versions: {
@@ -158,7 +227,7 @@ export function buildSanitizedSummary(run, hardening, knownSecrets) {
       dockerClient: expectString(run.versions?.docker?.Client?.Version, 'version Docker client'),
       dockerServer: expectString(run.versions?.docker?.Server?.Version, 'version Docker server'),
     },
-    architecture: 'trusted Windows app-server -> authenticated loopback WebSocket -> Docker exec-server -> named-volume /workspace',
+    architecture: expectString(run.architecture, 'architecture'),
     model: expectString(run.baseline?.model, 'modèle'),
     reasoningEffort: expectString(run.baseline?.reasoningEffort, 'reasoning effort'),
     oauth: { scopes, apiKeyUsed: false },
@@ -179,12 +248,15 @@ export function buildSanitizedSummary(run, hardening, knownSecrets) {
       baseline: turn(run.baseline),
       treatment: turn(run.treatment),
     },
-    routing: routingSummary(run.routing),
+    routing,
     securityChecks: hardening.securityChecks,
     networkChecks: networkSummary(hardening.network),
-    websocketAuthentication: {
-      mode: 'capability-token-sha256',
-      unauthenticatedConnectionRejected: hardening.unauthenticatedWebSocketRejected === true,
+    controlChannel: {
+      status: hardening.controlChannel?.status === 'pass' ? 'PASS' : 'NOT PROVEN',
+      transport: hardening.controlChannel?.transport ?? 'unknown',
+      listener: hardening.controlChannel?.listener ?? 'unknown',
+      initiator: hardening.controlChannel?.initiator ?? 'trusted host app-server',
+      authenticationBoundary: 'private inherited stdio pipe; no network listener',
     },
     baseline: runSummary(run.baseline),
     treatment: runSummary(run.treatment),
@@ -194,13 +266,43 @@ export function buildSanitizedSummary(run, hardening, knownSecrets) {
         !== run.treatment?.containerFacts?.mounts?.[0]?.name,
     },
     absenceOfKnownSecretsConfirmed: true,
+    limitations: [
+      'Codex environments and exec-server are experimental in 0.160.0.',
+      'The isolated runner has no network, including package registries.',
+      'Docker --internal did not publish the exec-server port on this Docker Desktop host; stdio is used instead.',
+    ],
   };
+  summary.decision = Object.values(routing).every((value) => value === 'SANDBOX')
+    && Object.values(summary.securityChecks).every((value) => value === true)
+    && summary.controlChannel.status === 'PASS'
+    && summary.networkChecks.networkPolicy.result === 'PASS'
+    && Object.entries(summary.networkChecks)
+      .filter(([name]) => name !== 'networkPolicy')
+      .every(([, value]) => value.result === 'BLOCKED')
+    && summary.baseline.tests.beforeExitCode === 1
+    && summary.baseline.tests.afterExitCode === 0
+    && summary.treatment.tests.beforeExitCode === 1
+    && summary.treatment.tests.afterExitCode === 0
+    && summary.baseline.securityPass
+    && summary.baseline.networkIsolationPass
+    && summary.treatment.securityPass
+    && summary.treatment.networkIsolationPass
+    && summary.ab.initialStateEqual
+    && summary.ab.independentWorkspaces
+    ? 'H2-A — PASS'
+    : 'H2-B — PARTIAL';
   if (containsSecret(summary, knownSecrets)) throw new Error('Credential connu détecté dans le résumé sanitisé');
   return summary;
 }
 
 function rows(object) {
   return Object.entries(object).map(([name, value]) => `| ${name} | ${String(value)} |`).join('\n');
+}
+
+function evidenceRows(object) {
+  return Object.entries(object)
+    .map(([name, value]) => `| ${name} | ${value.result} | ${value.proof} |`)
+    .join('\n');
 }
 
 export function renderSanitizedResult(summary, knownSecrets) {
@@ -253,15 +355,15 @@ ${rows(summary.securityChecks)}
 
 ## Network checks
 
-| Check | Result |
-|---|---|
-${rows(summary.networkChecks)}
+| Check | Result | Proof |
+|---|---|---|
+${evidenceRows(summary.networkChecks)}
 
-## WebSocket authentication
+## Control channel
 
 | Field | Value |
 |---|---|
-${rows(summary.websocketAuthentication)}
+${rows(summary.controlChannel)}
 
 ## Baseline
 
@@ -269,6 +371,8 @@ ${rows(summary.websocketAuthentication)}
 - Modified files: ${summary.baseline.modifiedFiles.join(', ') || 'none'}
 - Diff SHA-256: ${summary.baseline.diffSha256}
 - Host Git unchanged: ${summary.baseline.hostGitUnchanged}
+- Security probes pass: ${summary.baseline.securityPass}
+- Network isolation pass: ${summary.baseline.networkIsolationPass}
 
 ## Treatment
 
@@ -276,12 +380,22 @@ ${rows(summary.websocketAuthentication)}
 - Modified files: ${summary.treatment.modifiedFiles.join(', ') || 'none'}
 - Diff SHA-256: ${summary.treatment.diffSha256}
 - Host Git unchanged: ${summary.treatment.hostGitUnchanged}
+- Security probes pass: ${summary.treatment.securityPass}
+- Network isolation pass: ${summary.treatment.networkIsolationPass}
 
 ## A/B and hygiene
 
 - Initial state equal: ${summary.ab.initialStateEqual}
 - Independent workspaces: ${summary.ab.independentWorkspaces}
 - Absence of known secrets confirmed: ${summary.absenceOfKnownSecretsConfirmed}
+
+## Decision
+
+**${summary.decision}**
+
+## Limitations
+
+${summary.limitations.map((limitation) => `- ${limitation}`).join('\n')}
 `;
   if (containsSecret(markdown, knownSecrets)) throw new Error('Credential connu détecté dans RESULT.md');
   if (/Bearer\s+[A-Za-z0-9._~+\/-]{16,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.|sk-[A-Za-z0-9_-]{16,}/i.test(markdown)) {

@@ -40,6 +40,12 @@ export async function collectRoutingAssertions(environment) {
 
 function itemSummary(item) {
   if (!item || typeof item !== 'object') return null;
+  const changes = Array.isArray(item.changes)
+    ? item.changes.map((change) => ({
+      path: typeof change?.path === 'string' ? change.path : null,
+      kind: typeof change?.kind === 'string' ? change.kind : change?.kind?.type ?? null,
+    })).filter((change) => change.path)
+    : undefined;
   return {
     id: item.id ?? null,
     type: item.type ?? null,
@@ -49,18 +55,22 @@ function itemSummary(item) {
     exitCode: item.exitCode ?? undefined,
     durationMs: item.durationMs ?? undefined,
     outputHash: typeof item.aggregatedOutput === 'string' ? sha256(item.aggregatedOutput) : undefined,
-    changes: item.changes ? Object.keys(item.changes) : undefined,
+    changes,
   };
 }
 
-export function summarizeNotifications(events) {
+export function summarizeNotifications(events, attribution = {}) {
   return events
     .filter((event) => event.method !== 'item/agentMessage/delta')
     .map((event) => ({
     method: event.method,
     threadId: event.params?.threadId ?? null,
     turnId: event.params?.turnId ?? event.params?.turn?.id ?? null,
-    environmentId: event.params?.environmentId ?? event.params?.item?.environmentId ?? null,
+    environmentId: event.params?.environmentId
+      ?? event.params?.item?.environmentId
+      ?? (attribution.environmentId && event.params?.threadId === attribution.threadId
+        ? attribution.environmentId
+        : null),
     item: itemSummary(event.params?.item),
     }));
 }

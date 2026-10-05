@@ -1,0 +1,82 @@
+{
+  "id": "experiment-addition-v1",
+  "promptDefinition": {
+    "id": "implementer-story",
+    "name": "Implementer une Story",
+    "description": "Prompt logique utilise pour les taches d'implementation"
+  },
+  "promptVersion": {
+    "id": "implementer-story-v1",
+    "promptDefinitionId": "implementer-story",
+    "content": "Implemente uniquement la Story fournie.",
+    "fingerprint": "sha256:prompt-v1"
+  },
+  "target": {
+    "id": "math-fixture",
+    "source": "git",
+    "revision": "96bbdd2cf9cd8b01f21d77759bb8b5b190f4bf44"
+  },
+  "testCases": [
+    {
+      "kind": "fixed",
+      "id": "fixed-add",
+      "title": "Corriger l'addition",
+      "input": "Corrige uniquement la fonction add afin que les tests passent."
+    },
+    {
+      "kind": "generated",
+      "id": "generated-add-edge",
+      "title": "Addition avec nombres negatifs",
+      "input": "Verifie le comportement de add avec deux nombres negatifs.",
+      "provenance": {
+        "generatorId": "case-generator",
+        "generatorVersion": "1.0.0",
+        "generatedAt": "2026-10-05T10:00:00.000Z",
+        "seed": 42,
+        "instruction": {
+          "kind": "fingerprint",
+          "value": "sha256:generation-instruction"
+        },
+        "parentRef": "fixed-add"
+      }
+    }
+  ],
+  "configuration": {
+    "repetitions": 1,
+    "timeoutMs": 300000
+  },
+  "runs": [
+    {
+      "id": "run-fixed-add-1",
+      "experimentId": "experiment-addition-v1",
+      "testCaseId": "fixed-add",
+      "technicalStatus": "completed",
+      "humanReviewStatus": "pending_review",
+      "startedAt": "2026-10-05T10:01:00.000Z",
+      "finishedAt": "2026-10-05T10:01:10.000Z",
+      "exitCode": 0,
+      "durationMs": 10000,
+      "changedFiles": [
+        "src/math.cjs"
+      ],
+      "evidence": [
+        {
+          "type": "test-result",
+          "recordedAt": "2026-10-05T10:01:10.000Z",
+          "source": "test-runner",
+          "fingerprint": "sha256:test-output",
+          "artifactRef": "runs/run-fixed-add-1/test-results.json",
+          "metric": {
+            "name": "failedTests",
+            "value": 0,
+            "unit": "tests"
+          },
+          "data": {
+            "passed": 1,
+            "failed": 0
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "vitest",
+    "test": "vitest --exclude fixtures/app-exec-spike-target/**",
     "test:lab": "node --test tests/lab/*.node.mjs",
     "check": "node src/cli.mjs check",
     "dev": "tsx src/server.ts"
@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "jose": "^6.1.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "vitest": "^4.1.11"

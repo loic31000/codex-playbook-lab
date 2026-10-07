@@ -56,6 +56,7 @@ export interface RunExperimentPlanInput {
   readonly signal?: AbortSignal;
   readonly now?: () => Date;
   readonly onEvent?: (event: ExperimentExecutionEvent) => void | Promise<void>;
+  readonly onCheckpoint?: (state: ExperimentExecutionState) => void | Promise<void>;
 }
 
 function initialLogicalRun(plannedRun: PlannedRun): LogicalRunState {
@@ -282,6 +283,19 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
   let status: ExperimentExecutionStatus = "running";
   let baseline = previous?.baseline;
 
+  const stateSnapshot = (): ExperimentExecutionState => clonePreviousState({
+    planId: input.plan.id,
+    planFingerprint: input.plan.fingerprint,
+    status,
+    ...(baseline === undefined ? {} : { baseline }),
+    runs,
+    events,
+  });
+
+  const checkpoint = async (): Promise<void> => {
+    if (input.onCheckpoint) await input.onCheckpoint(stateSnapshot());
+  };
+
   const emit = async (type: ExperimentExecutionEventType, plannedRun?: PlannedRun, attempt = 0): Promise<ExperimentExecutionEvent> => {
     const common = {
       type,
@@ -319,6 +333,7 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
       throw new Error("execution baseline differs from previous orchestration state");
     }
     baseline = session.baseline;
+    await checkpoint();
     for (let index = 0; index < input.plan.plannedRuns.length; index += 1) {
       const plannedRun = input.plan.plannedRuns[index]!;
       const existing = runs[index]!;
@@ -329,6 +344,7 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
       if (input.signal?.aborted) {
         status = "interrupted";
         await emit("plan_interrupted");
+        await checkpoint();
         break;
       }
       const attempt = existing.attempt + 1;
@@ -341,6 +357,7 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
         startedAt: startedEvent.timestamp,
       });
       runs[index] = { ...existing, attempt, run: running, facts: undefined };
+      await checkpoint();
       const { experiment, testCase } = findPlannedRunContext(input.plan, plannedRun);
       const modelInput = buildExperimentModelInput({
         variant: plannedRun.variant,
@@ -353,6 +370,8 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
           experiment,
           testCase,
           modelInput,
+          attempt,
+          startedAt: startedEvent.timestamp,
           executor: input.executor,
           signal: input.signal,
         });
@@ -371,6 +390,7 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
             evidence: result.evidence,
           }),
         };
+        await checkpoint();
       } catch (error) {
         if (isAbort(error, input.signal)) {
           const cancelledEvent = await emit("run_cancelled", plannedRun, attempt);
@@ -381,8 +401,10 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
               finishedAt: cancelledEvent.timestamp,
             }),
           };
+          await checkpoint();
           status = "interrupted";
           await emit("plan_interrupted");
+          await checkpoint();
           break;
         }
         if (!(error instanceof LocalRunExecutionError)) throw error;
@@ -400,6 +422,7 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
             })],
           }),
         };
+        await checkpoint();
       }
     }
     if (status !== "interrupted") {
@@ -407,15 +430,9 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
         ? "completed_with_failures"
         : "completed";
       await emit(status === "completed" ? "plan_completed" : "plan_completed_with_failures");
+      await checkpoint();
     }
-    return {
-      planId: input.plan.id,
-      planFingerprint: input.plan.fingerprint,
-      status,
-      baseline,
-      runs,
-      events,
-    };
+    return stateSnapshot();
   } finally {
     await session.close();
   }

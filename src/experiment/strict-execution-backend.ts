@@ -144,6 +144,15 @@ class StrictExperimentExecutionSession implements ExperimentExecutionSession {
           policyFingerprint: strictPolicyFingerprint(facts),
           finalWorkspaceFingerprint: workspace.final.fingerprint,
         },
+        transcript: execution.transcript,
+        workspace: {
+          initialWorkspaceFingerprint: workspace.initial.fingerprint,
+          finalWorkspaceFingerprint: workspace.final.fingerprint,
+          changes: workspace.changes,
+          changedFiles: workspace.changedFiles,
+          initialGitDiffFromHead: workspace.initialGitDiffFromHead,
+          finalGitDiffFromHead: workspace.finalGitDiffFromHead,
+        },
       };
     }, { signal: request.signal });
   }

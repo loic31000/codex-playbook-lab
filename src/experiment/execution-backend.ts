@@ -1,11 +1,12 @@
 import type {
   Evidence,
   Experiment,
+  JsonObject,
   PromptVersion,
   TargetRef,
   TestCase,
 } from "../domain/index.js";
-import type { ProcessResult, RunProcessOptions } from "../runner/strict/index.js";
+import type { ProcessResult, RunProcessOptions, WorkspaceChange } from "../runner/strict/index.js";
 import type { PlannedRun } from "./plan.js";
 
 export class LocalRunExecutionError extends Error {
@@ -35,6 +36,14 @@ export interface ExperimentAgentEnvironment {
   exec(command: readonly string[], options?: RunProcessOptions): Promise<ProcessResult>;
 }
 
+export interface AgentExecutionTranscript {
+  readonly model: string;
+  readonly modelOptions: JsonObject;
+  readonly finalOutput: string;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 export interface ExperimentAgentExecutor {
   execute(request: {
     readonly plannedRun: PlannedRun;
@@ -49,6 +58,7 @@ export interface ExperimentAgentExecutor {
   }): Promise<{
     readonly exitCode: number;
     readonly evidence?: readonly Evidence[];
+    readonly transcript: AgentExecutionTranscript;
   }>;
 }
 
@@ -70,6 +80,17 @@ export interface BackendRunResult {
   readonly changedFiles: readonly string[];
   readonly evidence: readonly Evidence[];
   readonly facts: ExecutionAttemptFacts;
+  readonly transcript: AgentExecutionTranscript;
+  readonly workspace: WorkspaceExecutionResult;
+}
+
+export interface WorkspaceExecutionResult {
+  readonly initialWorkspaceFingerprint: string;
+  readonly finalWorkspaceFingerprint: string;
+  readonly changes: readonly WorkspaceChange[];
+  readonly changedFiles: readonly string[];
+  readonly initialGitDiffFromHead: string | null;
+  readonly finalGitDiffFromHead: string | null;
 }
 
 export interface BackendRunRequest {
@@ -77,6 +98,8 @@ export interface BackendRunRequest {
   readonly experiment: Experiment;
   readonly testCase: TestCase;
   readonly modelInput: string;
+  readonly attempt: number;
+  readonly startedAt: string;
   readonly executor: ExperimentAgentExecutor;
   readonly signal?: AbortSignal;
 }

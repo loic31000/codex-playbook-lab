@@ -29,6 +29,20 @@ const fixedInput = "# Fixed case\n\nApply the fixed change.\n";
 const generatedInput = "# Generated case\r\n\r\nPreserve this exact text.  \r\n";
 const provenanceSentinel = "ORACLE_PROVENANCE_SENTINEL_27";
 
+function fakeTranscript() {
+  return {
+    model: "fake-agent-model",
+    modelOptions: { temperature: 0 },
+    finalOutput: "fake final output",
+    stdout: "fake stdout",
+    stderr: "",
+  };
+}
+
+function successfulAgentResult() {
+  return { exitCode: 0, transcript: fakeTranscript() };
+}
+
 function generatedProvenance(
   markdown = generatedInput,
   overrides: Record<string, unknown> = {},
@@ -161,6 +175,20 @@ class FakeBackend implements ExperimentExecutionBackend {
             policyFingerprint: this.value.policyFingerprint,
             finalWorkspaceFingerprint: `final-${request.plannedRun.id}`,
           },
+          transcript: execution.transcript,
+          workspace: {
+            initialWorkspaceFingerprint: this.value.workspaceFingerprint,
+            finalWorkspaceFingerprint: `final-${request.plannedRun.id}`,
+            changes: [{
+              path: `run-${request.plannedRun.ordinal}.txt`,
+              status: "added" as const,
+              before: null,
+              after: { kind: "file" as const, sha256: `sha-${request.plannedRun.ordinal}` },
+            }],
+            changedFiles: [`run-${request.plannedRun.ordinal}.txt`],
+            initialGitDiffFromHead: "",
+            finalGitDiffFromHead: `diff --git a/run-${request.plannedRun.ordinal}.txt b/run-${request.plannedRun.ordinal}.txt\n`,
+          },
         };
       },
       close: async () => {
@@ -177,7 +205,7 @@ function deterministicClock(): () => Date {
 
 const successfulExecutor: ExperimentAgentExecutor = {
   async execute() {
-    return { exitCode: 0 };
+    return successfulAgentResult();
   },
 };
 
@@ -196,7 +224,7 @@ async function interruptedExecution(
         controller.abort();
         throw Object.assign(new Error("interrupted"), { name: "AbortError" });
       }
-      return { exitCode: 0 };
+      return successfulAgentResult();
     },
   };
   const state = await runExperimentPlan({
@@ -455,7 +483,7 @@ describe("experiment orchestration state machine", () => {
         executor: {
           async execute() {
             agentCalls += 1;
-            return { exitCode: 0 };
+            return successfulAgentResult();
           },
         },
       })).rejects.toThrow();
@@ -488,7 +516,7 @@ describe("experiment orchestration state machine", () => {
       executor: {
         async execute() {
           agentCalls += 1;
-          return { exitCode: 0 };
+          return successfulAgentResult();
         },
       },
     })).rejects.toThrow(/skipped event attempt|attempt exceeds/);
@@ -538,7 +566,7 @@ describe("experiment orchestration state machine", () => {
       executor: {
         async execute({ plannedRun }) {
           resumedIds.push(plannedRun.id);
-          return { exitCode: 0 };
+          return successfulAgentResult();
         },
       },
       now: clock,
@@ -569,7 +597,7 @@ describe("experiment orchestration state machine", () => {
       executor: {
         async execute() {
           agentCalls += 1;
-          return { exitCode: 0 };
+          return successfulAgentResult();
         },
       },
     })).rejects.toThrow(/gitStatus must be a string or null/);
@@ -629,7 +657,7 @@ describe("experiment orchestration state machine", () => {
       executor: {
         async execute({ plannedRun }) {
           resumedIds.push(plannedRun.id);
-          return { exitCode: 0 };
+          return successfulAgentResult();
         },
       },
       now: clock,
@@ -675,7 +703,7 @@ describe("experiment orchestration state machine", () => {
       async execute({ plannedRun }) {
         executed.push(plannedRun.ordinal);
         if (plannedRun.ordinal === 5) throw new Error("synthetic local failure");
-        return { exitCode: 0 };
+        return successfulAgentResult();
       },
     };
     const state = await runExperimentPlan({
@@ -700,7 +728,7 @@ describe("experiment orchestration state machine", () => {
       executor: {
         async execute({ plannedRun }) {
           resumeExecutions.push(plannedRun.id);
-          return { exitCode: 0 };
+          return successfulAgentResult();
         },
       },
       now: deterministicClock(),
@@ -745,7 +773,7 @@ describe("experiment orchestration state machine", () => {
       executor: {
         async execute() {
           agentCalls += 1;
-          return { exitCode: 0 };
+          return successfulAgentResult();
         },
       },
     })).rejects.toThrow(/baseline differs/);

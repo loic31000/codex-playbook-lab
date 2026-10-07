@@ -110,11 +110,17 @@ function isIsoTimestamp(value: unknown): value is string {
     && !Number.isNaN(Date.parse(value));
 }
 
-function assertBaselineField(value: unknown, path: string, nullable = false): void {
-  if (nullable && value === null) return;
-  if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`${path} must be ${nullable ? "a string or null" : "a non-empty string"}`);
-  }
+function assertNonEmptyString(value: unknown, path: string): void {
+  if (typeof value !== "string" || value.length === 0) throw new TypeError(`${path} must be a non-empty string`);
+}
+
+function assertNullableNonEmptyString(value: unknown, path: string): void {
+  if (value === null) return;
+  assertNonEmptyString(value, path);
+}
+
+function assertNullableString(value: unknown, path: string): void {
+  if (value !== null && typeof value !== "string") throw new TypeError(`${path} must be a string or null`);
 }
 
 function validateResumeBaseline(plan: ExperimentExecutionPlan, state: ExperimentExecutionState): void {
@@ -129,12 +135,12 @@ function validateResumeBaseline(plan: ExperimentExecutionPlan, state: Experiment
   if (canonicalJson(target) !== canonicalJson(plan.target)) {
     throw new Error("previous orchestration state baseline target differs from the execution plan target");
   }
-  assertBaselineField(state.baseline.workspaceFingerprint, "previousState.baseline.workspaceFingerprint");
-  assertBaselineField(state.baseline.gitHead, "previousState.baseline.gitHead", true);
-  assertBaselineField(state.baseline.gitTree, "previousState.baseline.gitTree", true);
-  assertBaselineField(state.baseline.gitStatus, "previousState.baseline.gitStatus", true);
-  assertBaselineField(state.baseline.image, "previousState.baseline.image");
-  assertBaselineField(state.baseline.policyFingerprint, "previousState.baseline.policyFingerprint");
+  assertNonEmptyString(state.baseline.workspaceFingerprint, "previousState.baseline.workspaceFingerprint");
+  assertNullableNonEmptyString(state.baseline.gitHead, "previousState.baseline.gitHead");
+  assertNullableNonEmptyString(state.baseline.gitTree, "previousState.baseline.gitTree");
+  assertNullableString(state.baseline.gitStatus, "previousState.baseline.gitStatus");
+  assertNonEmptyString(state.baseline.image, "previousState.baseline.image");
+  assertNonEmptyString(state.baseline.policyFingerprint, "previousState.baseline.policyFingerprint");
 }
 
 function validateHistoricalEvents(plan: ExperimentExecutionPlan, state: ExperimentExecutionState): void {

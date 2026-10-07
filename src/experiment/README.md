@@ -25,7 +25,9 @@ greater. The state machine never produces pending with a positive attempt, so
 that combination is rejected. The latest non-skipped lifecycle event must
 match the run's current technical status and attempt. Once execution has
 started, the prior technical baseline is mandatory and its target must exactly
-match the plan target.
+match the plan target. Baseline `gitStatus` preserves the exact
+`git status --porcelain=v1 -z` value and accepts any string, including the empty
+string for a clean repository, or `null`; it is never trimmed or normalized.
 
 `StrictExperimentExecutionBackend` prepares one master `StrictWorkspaceSnapshot`
 per invocation. A policy probe establishes the technical baseline before the

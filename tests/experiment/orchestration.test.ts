@@ -181,7 +181,10 @@ const successfulExecutor: ExperimentAgentExecutor = {
   },
 };
 
-async function interruptedExecution(plan = planFromRaw()): Promise<{
+async function interruptedExecution(
+  plan = planFromRaw(),
+  executionBaseline: ExecutionBaseline = baseline(),
+): Promise<{
   state: ExperimentExecutionState;
   clock: () => Date;
 }> {
@@ -198,7 +201,7 @@ async function interruptedExecution(plan = planFromRaw()): Promise<{
   };
   const state = await runExperimentPlan({
     plan,
-    backend: new FakeBackend(),
+    backend: new FakeBackend(executionBaseline),
     targetPath: "C:/explicit-target",
     executor,
     signal: controller.signal,
@@ -519,6 +522,59 @@ describe("experiment orchestration state machine", () => {
       "plan_completed",
     ]);
     expect(JSON.stringify(state)).not.toMatch(/winner|betterPrompt|worsePrompt|verdict|score|approved|rejected/i);
+  });
+
+  it("resumes an interrupted clean Git baseline without replaying completed runs", async () => {
+    const plan = planFromRaw();
+    const cleanBaseline = baseline({ gitStatus: "" });
+    const { state: interrupted, clock } = await interruptedExecution(plan, cleanBaseline);
+    const resumedIds: string[] = [];
+    const backend = new FakeBackend(cleanBaseline);
+    const resumed = await runExperimentPlan({
+      plan,
+      backend,
+      targetPath: "C:/explicit-target",
+      previousState: interrupted,
+      executor: {
+        async execute({ plannedRun }) {
+          resumedIds.push(plannedRun.id);
+          return { exitCode: 0 };
+        },
+      },
+      now: clock,
+    });
+    expect(backend.openCount).toBe(1);
+    expect(resumedIds).toEqual(plan.plannedRuns.slice(4).map(({ id }) => id));
+    expect(resumed.runs.slice(0, 4).every(({ attempt }) => attempt === 1)).toBe(true);
+    expect(resumed.runs[4]!.attempt).toBe(2);
+    expect(resumed.runs.slice(5).every(({ attempt }) => attempt === 1)).toBe(true);
+    expect(resumed.runs).toHaveLength(12);
+    expect(new Set(resumed.runs.map(({ plannedRunId }) => plannedRunId)).size).toBe(12);
+    expect(resumed.baseline?.gitStatus).toBe("");
+    expect(resumed.status).toBe("completed");
+  });
+
+  it.each([42, {}, [], true])("rejects invalid Git status %p before backend.open()", async (invalidGitStatus) => {
+    const plan = planFromRaw();
+    const { state } = await interruptedExecution(plan);
+    const corrupted = JSON.parse(JSON.stringify(state)) as ExperimentExecutionState;
+    mutable(corrupted.baseline!).gitStatus = invalidGitStatus;
+    const backend = new FakeBackend(state.baseline);
+    let agentCalls = 0;
+    await expect(runExperimentPlan({
+      plan,
+      backend,
+      targetPath: "C:/explicit-target",
+      previousState: corrupted,
+      executor: {
+        async execute() {
+          agentCalls += 1;
+          return { exitCode: 0 };
+        },
+      },
+    })).rejects.toThrow(/gitStatus must be a string or null/);
+    expect(backend.openCount).toBe(0);
+    expect(agentCalls).toBe(0);
   });
 
   it("preserves a valid future human review without rewriting it", async () => {

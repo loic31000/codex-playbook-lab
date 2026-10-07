@@ -4,6 +4,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { fingerprintExactText } from "../../src/explore/index.js";
+import {
+  createExperimentExecutionPlan,
+  runExperimentPlan,
+  StrictExperimentExecutionBackend,
+} from "../../src/experiment/index.js";
 import {
   STRICT_RESOURCE_PREFIX,
   STRICT_RUNNER_IMAGE,
@@ -302,6 +308,103 @@ describe.sequential("strict isolated runner", () => {
     });
     expect(await captureSourceState(targetRoot)).toEqual(initialSourceState);
   }, 180_000);
+
+  integration("orchestre quatre runs depuis un snapshot maitre sans fuite entre workspaces", async () => {
+    const target = {
+      id: "orchestration-target",
+      source: "git",
+      revision: initialSourceState.workspace.gitHead ?? undefined,
+    };
+    const generatedInput = "Generated case exact input";
+    const instruction = "Generate the exact integration case";
+    const provenance = {
+      generatorId: "generated-case-generator-26",
+      generatorVersion: "1.0.0",
+      generatedAt: "2026-10-07T10:00:00.000Z",
+      instruction: { kind: "content" as const, value: instruction },
+      instructionVersion: "v1",
+      instructionFingerprint: fingerprintExactText(instruction),
+      model: "fake-generator",
+      modelOptions: { temperature: 0 },
+      target,
+      contentFingerprint: fingerprintExactText(generatedInput),
+      reproducibility: "not_guaranteed" as const,
+      seed: "seed-from-26",
+      parentRef: "generated-parent",
+    };
+    const plan = createExperimentExecutionPlan({
+      id: "strict-four-run-plan",
+      experiments: [{
+        id: "strict-four-run-experiment",
+        promptDefinition: { id: "prompt-definition", name: "Strict integration prompt" },
+        promptVersion: {
+          id: "prompt-version",
+          promptDefinitionId: "prompt-definition",
+          content: "Treatment instructions",
+        },
+        target,
+        testCases: [
+          { kind: "fixed", id: "fixed-case", title: "Fixed", input: "Fixed case exact input" },
+          { kind: "generated", id: "generated-case", title: "Generated", input: generatedInput, provenance },
+        ],
+        configuration: { repetitions: 1 },
+        runs: [],
+      }],
+    });
+    const observedInputs: string[] = [];
+    const state = await runExperimentPlan({
+      plan,
+      backend: new StrictExperimentExecutionBackend(createRunner()),
+      targetPath: targetRoot,
+      executor: {
+        async execute({ environment, modelInput, plannedRun }) {
+          observedInputs.push(modelInput);
+          const priorMutation = await environment.exec([
+            "sh", "-lc", "find /workspace -maxdepth 1 -type f -name 'run-*.txt' -print",
+          ]);
+          expect(priorMutation.code).toBe(0);
+          expect(priorMutation.stdout.trim()).toBe("");
+          const mutation = await environment.exec([
+            "sh", "-lc", `printf '%s\\n' run-${plannedRun.ordinal} > /workspace/run-${plannedRun.ordinal}.txt`,
+          ]);
+          expect(mutation.code).toBe(0);
+          return { exitCode: 0 };
+        },
+      },
+    });
+
+    expect(state.status).toBe("completed");
+    expect(state.runs).toHaveLength(4);
+    expect(state.runs.every(({ run }) => (
+      run.technicalStatus === "completed" && run.humanReviewStatus === "pending_review"
+    ))).toBe(true);
+    expect(observedInputs).toEqual([
+      "Fixed case exact input",
+      "Treatment instructions\n\n---\n\nFixed case exact input",
+      generatedInput,
+      `Treatment instructions\n\n---\n\n${generatedInput}`,
+    ]);
+    expect(new Set(state.runs.map(({ facts }) => facts?.initialWorkspaceFingerprint)).size).toBe(1);
+    expect(new Set(state.runs.map(({ facts }) => facts?.initialGitHead)).size).toBe(1);
+    expect(new Set(state.runs.map(({ facts }) => facts?.initialGitTree)).size).toBe(1);
+    expect(new Set(state.runs.map(({ facts }) => facts?.initialGitStatus)).size).toBe(1);
+    expect(new Set(state.runs.map(({ facts }) => facts?.image)).size).toBe(1);
+    expect(new Set(state.runs.map(({ facts }) => facts?.policyFingerprint)).size).toBe(1);
+    expect(new Set(state.runs.map(({ facts }) => facts?.volume)).size).toBe(4);
+    expect(state.runs.map(({ run }, index) => run.changedFiles)).toEqual([
+      ["run-1.txt"],
+      ["run-2.txt"],
+      ["run-3.txt"],
+      ["run-4.txt"],
+    ]);
+    expect(plan.experiments[0]!.testCases[1]).toMatchObject({
+      kind: "generated",
+      input: generatedInput,
+      provenance,
+    });
+    expect(await captureSourceState(targetRoot)).toEqual(initialSourceState);
+    expect(await strictResources()).toEqual({ containers: [], volumes: [] });
+  }, 300_000);
 
   integration("nettoie container, volume et snapshot apres succes", async () => {
     const runner = createRunner();

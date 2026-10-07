@@ -1,19 +1,20 @@
 import type { FixedCase, PromptVersion } from "../domain/index.js";
+import {
+  EXPERIMENT_INPUT_SEPARATOR,
+  buildExperimentModelInput,
+  type ExperimentVariant,
+} from "../experiment/model-input.js";
 
-export type FixedBenchmarkVariant = "baseline" | "treatment";
+export type FixedBenchmarkVariant = ExperimentVariant;
 
 // This separator is part of the reproducibility contract. It deliberately
 // contains no benchmark metadata and changes only with an explicit API change.
-export const FIXED_BENCHMARK_INPUT_SEPARATOR = "\n\n---\n\n";
+export const FIXED_BENCHMARK_INPUT_SEPARATOR = EXPERIMENT_INPUT_SEPARATOR;
 
 export function buildFixedBenchmarkModelInput(input: {
   readonly variant: FixedBenchmarkVariant;
   readonly promptVersion: PromptVersion;
   readonly testCase: FixedCase;
 }): string {
-  if (input.variant === "baseline") return input.testCase.input;
-  if (input.variant === "treatment") {
-    return `${input.promptVersion.content}${FIXED_BENCHMARK_INPUT_SEPARATOR}${input.testCase.input}`;
-  }
-  throw new TypeError(`unknown fixed benchmark variant: ${String(input.variant)}`);
+  return buildExperimentModelInput(input);
 }

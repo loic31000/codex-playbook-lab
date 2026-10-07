@@ -7,10 +7,10 @@ import type {
   TestCase,
 } from "../domain/index.js";
 import type {
-  AgentExecutionTranscript,
   ExecutionBaseline,
   WorkspaceExecutionResult,
 } from "../experiment/execution-backend.js";
+import type { ExperimentRunEvent } from "../experiment/events.js";
 import type { ExperimentExecutionState } from "../experiment/orchestrator.js";
 import type { ExperimentExecutionPlan, PlannedRun } from "../experiment/plan.js";
 
@@ -37,7 +37,7 @@ export interface EvidenceFingerprints {
   readonly testCase: string;
   readonly target: string;
   readonly runner: string;
-  readonly configuration: string;
+  readonly configuration: string | null;
   readonly plan: string;
 }
 
@@ -81,9 +81,9 @@ export interface AttemptStartedRecord extends EvidenceRecordHeader {
 
 export interface AttemptArtifactReferences {
   readonly modelInput: ArtifactReference;
-  readonly finalOutput: ArtifactReference;
-  readonly stdout: ArtifactReference;
-  readonly stderr: ArtifactReference;
+  readonly finalOutput: ArtifactReference | null;
+  readonly stdout: ArtifactReference | null;
+  readonly stderr: ArtifactReference | null;
   readonly initialGitDiffFromHead: ArtifactReference | null;
   readonly finalGitDiffFromHead: ArtifactReference | null;
 }
@@ -101,6 +101,20 @@ export interface StoredWorkspaceExecution extends Omit<
   readonly finalGitDiffAvailable: boolean;
 }
 
+export type AttemptTermination =
+  | {
+      readonly kind: "process_exit";
+      readonly exitCode: number;
+    }
+  | {
+      readonly kind: "execution_error";
+      readonly errorName: string;
+    };
+
+export type AttemptTerminalEvent = ExperimentRunEvent & {
+  readonly type: "run_completed" | "run_failed";
+};
+
 export interface AttemptManifestRecord extends EvidenceRecordHeader {
   readonly kind: "attempt-manifest";
   readonly planId: string;
@@ -116,14 +130,16 @@ export interface AttemptManifestRecord extends EvidenceRecordHeader {
   readonly humanReviewStatus: ExperimentRun["humanReviewStatus"];
   readonly startedAt: string;
   readonly finishedAt: string;
-  readonly durationMs: number;
-  readonly exitCode: number;
+  readonly durationMs: number | null;
+  readonly exitCode: number | null;
   readonly changedFiles: readonly string[];
   readonly fingerprints: EvidenceFingerprints;
-  readonly agent: StoredAgentExecution;
+  readonly termination: AttemptTermination;
+  readonly terminalEvent: AttemptTerminalEvent;
+  readonly agent: StoredAgentExecution | null;
   readonly artifacts: AttemptArtifactReferences;
   readonly baseline: ExecutionBaseline;
-  readonly workspace: StoredWorkspaceExecution;
+  readonly workspace: StoredWorkspaceExecution | null;
   readonly evidence: readonly Evidence[];
   readonly experiment: Experiment;
   readonly plannedRun: PlannedRun;
@@ -148,19 +164,4 @@ export interface StoredRunAttempt {
   readonly summary: RunAttemptSummary;
   readonly started: AttemptStartedRecord;
   readonly manifest: AttemptManifestRecord | null;
-}
-
-export interface FinalizeAttemptInput {
-  readonly plan: ExperimentExecutionPlan;
-  readonly experiment: Experiment;
-  readonly plannedRun: PlannedRun;
-  readonly testCase: TestCase;
-  readonly promptVersion: PromptVersion;
-  readonly experimentRun: ExperimentRun;
-  readonly attempt: number;
-  readonly baseline: ExecutionBaseline;
-  readonly transcript: AgentExecutionTranscript;
-  readonly workspace: WorkspaceExecutionResult;
-  readonly durationMs: number;
-  readonly exitCode: number;
 }

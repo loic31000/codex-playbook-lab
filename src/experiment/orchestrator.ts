@@ -208,7 +208,10 @@ function validateHistoricalEvents(plan: ExperimentExecutionPlan, state: Experime
   }
 }
 
-function validatePreviousState(plan: ExperimentExecutionPlan, state: ExperimentExecutionState): void {
+export function validateExperimentExecutionState(
+  plan: ExperimentExecutionPlan,
+  state: ExperimentExecutionState,
+): void {
   if (state.planId !== plan.id || state.planFingerprint !== plan.fingerprint) {
     throw new Error("previous orchestration state plan fingerprint does not match the execution plan");
   }
@@ -273,7 +276,7 @@ export async function runExperimentPlan(input: RunExperimentPlanInput): Promise<
   if (typeof input.targetPath !== "string" || input.targetPath.trim() === "") {
     throw new TypeError("targetPath must be explicitly provided");
   }
-  if (input.previousState) validatePreviousState(input.plan, input.previousState);
+  if (input.previousState) validateExperimentExecutionState(input.plan, input.previousState);
   const previous = input.previousState ? clonePreviousState(input.previousState) : undefined;
   const runs = previous
     ? [...previous.runs]

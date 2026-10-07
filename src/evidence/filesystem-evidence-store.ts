@@ -1,10 +1,24 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { createExperimentExecutionPlan, type ExperimentExecutionPlan } from "../experiment/plan.js";
+import { parseExperimentRun } from "../domain/index.js";
+import { buildExperimentModelInput } from "../experiment/model-input.js";
+import {
+  createExperimentExecutionPlan,
+  findPlannedRunContext,
+  type ExperimentExecutionPlan,
+  type PlannedRun,
+} from "../experiment/plan.js";
 import { canonicalJson, sha256Canonical } from "../experiment/canonical-json.js";
 import type { ExperimentExecutionState } from "../experiment/orchestrator.js";
 import { ContentAddressedBlobStore, writeOnceCanonicalJson } from "./blob-store.js";
+import {
+  caseEvidenceFingerprint,
+  configurationEvidenceFingerprint,
+  promptEvidenceFingerprint,
+  runnerEvidenceFingerprint,
+  targetEvidenceFingerprint,
+} from "./fingerprints.js";
 import {
   EVIDENCE_STORE_FORMAT,
   EVIDENCE_STORE_VERSION,
@@ -20,7 +34,7 @@ import {
 } from "./schema.js";
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const CHECKPOINT_PATTERN = /^(\d{8})\.json$/;
+const CHECKPOINT_PATTERN = /^(\d{8,})\.json$/;
 const ATTEMPT_PATTERN = /^attempt-(\d{4})$/;
 
 function assertFingerprint(value: string, pathName: string): void {
@@ -44,6 +58,33 @@ function attemptDirectoryName(attempt: number): string {
 function checkpointFilename(sequence: number): string {
   assertPositiveInteger(sequence, "checkpoint sequence");
   return `${String(sequence).padStart(8, "0")}.json`;
+}
+
+function checkpointSequence(entry: string): number | null {
+  const match = CHECKPOINT_PATTERN.exec(entry);
+  if (!match) return null;
+  const sequence = Number(match[1]);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
+}
+
+async function regularFileExists(filename: string): Promise<boolean> {
+  try {
+    const stats = await fs.stat(filename);
+    if (!stats.isFile()) throw new Error(`${filename} is not a regular file`);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function readFileIfPresent(filename: string): Promise<Buffer | null> {
+  try {
+    return await fs.readFile(filename);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -176,10 +217,12 @@ export class FilesystemEvidenceStore {
     const directory = this.checkpointDirectory(plan.fingerprint);
     await fs.mkdir(directory, { recursive: true });
     const entries = await fs.readdir(directory);
-    const sequence = entries.reduce((highest, entry) => {
-      const match = CHECKPOINT_PATTERN.exec(entry);
-      return match ? Math.max(highest, Number(match[1])) : highest;
-    }, 0) + 1;
+    const highest = entries.reduce((current, entry) => {
+      const sequence = checkpointSequence(entry);
+      return sequence === null ? current : Math.max(current, sequence);
+    }, 0);
+    if (highest >= Number.MAX_SAFE_INTEGER) throw new Error("checkpoint sequence space is exhausted");
+    const sequence = highest + 1;
     const record: StoredCheckpointRecord = {
       format: EVIDENCE_STORE_FORMAT,
       version: EVIDENCE_STORE_VERSION,
@@ -212,16 +255,18 @@ export class FilesystemEvidenceStore {
       throw error;
     }
     const candidates = entries
-      .filter((entry) => CHECKPOINT_PATTERN.test(entry))
-      .sort()
-      .reverse();
+      .map((entry) => ({ entry, sequence: checkpointSequence(entry) }))
+      .filter((candidate): candidate is { entry: string; sequence: number } => candidate.sequence !== null)
+      .sort((left, right) => right.sequence - left.sequence);
     const invalidCheckpointRefs: string[] = [];
-    for (const entry of candidates) {
+    let newestValid: StoredCheckpointRecord | null = null;
+    for (const { entry, sequence } of candidates) {
       const ref = `plans/${planFingerprint}/checkpoints/${entry}`;
+      const bytes = await readFileIfPresent(path.join(directory, entry));
+      if (bytes === null) continue;
       try {
-        const parsed = JSON.parse(await fs.readFile(path.join(directory, entry), "utf8")) as unknown;
+        const parsed = JSON.parse(bytes.toString("utf8")) as unknown;
         assertHeader(parsed, "checkpoint");
-        const sequence = Number(CHECKPOINT_PATTERN.exec(entry)![1]);
         if (
           parsed.sequence !== sequence
           || parsed.planId !== plan.id
@@ -231,16 +276,18 @@ export class FilesystemEvidenceStore {
         ) {
           throw new Error("checkpoint metadata or content fingerprint is invalid");
         }
-        return { checkpoint: parsed as unknown as StoredCheckpointRecord, invalidCheckpointRefs };
+        newestValid ??= parsed as unknown as StoredCheckpointRecord;
       } catch {
         invalidCheckpointRefs.push(ref);
       }
     }
-    return { checkpoint: null, invalidCheckpointRefs };
+    return { checkpoint: newestValid, invalidCheckpointRefs };
   }
 
   async writeAttemptStarted(record: AttemptStartedRecord, forbiddenAbsolutePaths: readonly string[] = []): Promise<void> {
     this.assertAttemptIdentity(record);
+    const plan = await this.readPlan(record.planFingerprint);
+    await this.validateStartedAgainstPlan(plan, record);
     this.assertPortable(record, forbiddenAbsolutePaths);
     await writeOnceCanonicalJson(
       this.attemptFile(record.planFingerprint, record.plannedRunId, record.attempt, "started.json"),
@@ -253,15 +300,8 @@ export class FilesystemEvidenceStore {
     this.assertAttemptIdentity(record);
     this.assertPortable(record, forbiddenAbsolutePaths);
     const started = await this.readAttemptStarted(record.planFingerprint, record.plannedRunId, record.attempt);
-    if (
-      started.planId !== record.planId
-      || started.planFingerprint !== record.planFingerprint
-      || started.plannedRunId !== record.plannedRunId
-      || started.attempt !== record.attempt
-      || started.modelInput.sha256 !== record.artifacts.modelInput.sha256
-    ) {
-      throw new Error("attempt manifest does not match its immutable started record");
-    }
+    const plan = await this.readPlan(record.planFingerprint);
+    await this.validateAttemptRecords(plan, started, record);
     await writeOnceCanonicalJson(
       this.attemptFile(record.planFingerprint, record.plannedRunId, record.attempt, "manifest.json"),
       record,
@@ -285,18 +325,9 @@ export class FilesystemEvidenceStore {
       if (!match) continue;
       const attempt = Number(match[1]);
       const startedPath = path.join(directory, entry, "started.json");
-      try {
-        await fs.access(startedPath);
-      } catch {
-        continue;
-      }
+      if (!await regularFileExists(startedPath)) continue;
       const manifestPath = path.join(directory, entry, "manifest.json");
-      let finalized = true;
-      try {
-        await fs.access(manifestPath);
-      } catch {
-        finalized = false;
-      }
+      const finalized = await regularFileExists(manifestPath);
       const prefix = `plans/${planFingerprint}/runs/${runDirectoryName(plannedRunId)}/${entry}`;
       summaries.push({
         attempt,
@@ -319,7 +350,213 @@ export class FilesystemEvidenceStore {
           "attempt-manifest",
         )
       : null;
+    const plan = await this.readPlan(planFingerprint);
+    await this.validateStartedAgainstPlan(plan, started);
+    if (manifest) await this.validateAttemptRecords(plan, started, manifest);
     return { summary, started, manifest };
+  }
+
+  private plannedRun(plan: ExperimentExecutionPlan, plannedRunId: string): PlannedRun {
+    const plannedRun = plan.plannedRuns.find(({ id }) => id === plannedRunId);
+    if (!plannedRun) throw new Error(`attempt references unknown PlannedRun ${plannedRunId}`);
+    return plannedRun;
+  }
+
+  private async validateStartedAgainstPlan(
+    plan: ExperimentExecutionPlan,
+    started: AttemptStartedRecord,
+  ): Promise<void> {
+    const plannedRun = this.plannedRun(plan, started.plannedRunId);
+    const { experiment, testCase } = findPlannedRunContext(plan, plannedRun);
+    if (
+      started.planId !== plan.id
+      || started.planFingerprint !== plan.fingerprint
+      || started.experimentId !== plannedRun.experimentId
+      || started.promptVersionId !== plannedRun.promptVersionId
+      || started.testCaseId !== plannedRun.testCaseId
+      || started.variant !== plannedRun.variant
+      || started.repetition !== plannedRun.repetition
+    ) {
+      throw new Error("attempt started record differs from its immutable plan or PlannedRun");
+    }
+    if (canonicalJson(started.baseline.target) !== canonicalJson(plan.target)) {
+      throw new Error("attempt started baseline target differs from the immutable plan");
+    }
+    const expectedFingerprints = {
+      prompt: promptEvidenceFingerprint(experiment.promptVersion),
+      testCase: caseEvidenceFingerprint(testCase),
+      target: targetEvidenceFingerprint(plan.target, started.baseline),
+      runner: runnerEvidenceFingerprint(started.baseline),
+      plan: plan.fingerprint,
+    };
+    if (canonicalJson(started.fingerprints) !== canonicalJson(expectedFingerprints)) {
+      throw new Error("attempt started fingerprints differ from the immutable plan or baseline");
+    }
+    const expectedInput = buildExperimentModelInput({
+      variant: plannedRun.variant,
+      promptVersion: experiment.promptVersion,
+      testCase,
+    });
+    const storedInput = await this.readArtifact(started.modelInput);
+    if (!storedInput.equals(Buffer.from(expectedInput, "utf8"))) {
+      throw new Error("attempt started model input differs from its PlannedRun input");
+    }
+  }
+
+  private async validateAttemptRecords(
+    plan: ExperimentExecutionPlan,
+    started: AttemptStartedRecord,
+    manifest: AttemptManifestRecord,
+  ): Promise<void> {
+    await this.validateStartedAgainstPlan(plan, started);
+    const plannedRun = this.plannedRun(plan, manifest.plannedRunId);
+    const { experiment, testCase } = findPlannedRunContext(plan, plannedRun);
+    const linkedStartedFields = [
+      "planId",
+      "planFingerprint",
+      "plannedRunId",
+      "attempt",
+      "experimentId",
+      "promptVersionId",
+      "testCaseId",
+      "variant",
+      "repetition",
+      "startedAt",
+    ] as const;
+    for (const field of linkedStartedFields) {
+      if (manifest[field] !== started[field]) {
+        throw new Error(`attempt manifest ${field} differs from its immutable started record`);
+      }
+    }
+    if (
+      canonicalJson(manifest.baseline) !== canonicalJson(started.baseline)
+      || canonicalJson(manifest.artifacts.modelInput) !== canonicalJson(started.modelInput)
+      || canonicalJson({
+        prompt: manifest.fingerprints.prompt,
+        testCase: manifest.fingerprints.testCase,
+        target: manifest.fingerprints.target,
+        runner: manifest.fingerprints.runner,
+        plan: manifest.fingerprints.plan,
+      }) !== canonicalJson(started.fingerprints)
+    ) {
+      throw new Error("attempt manifest baseline, model input or fingerprints differ from its immutable started record");
+    }
+    if (
+      canonicalJson(manifest.plannedRun) !== canonicalJson(plannedRun)
+      || canonicalJson(manifest.experiment) !== canonicalJson(experiment)
+      || canonicalJson(manifest.testCase) !== canonicalJson(testCase)
+      || canonicalJson(manifest.promptVersion) !== canonicalJson(experiment.promptVersion)
+    ) {
+      throw new Error("attempt manifest domain records differ from the immutable plan");
+    }
+
+    const run = parseExperimentRun(manifest.experimentRun);
+    if (
+      run.id !== plannedRun.id
+      || run.experimentId !== plannedRun.experimentId
+      || run.testCaseId !== plannedRun.testCaseId
+      || run.technicalStatus !== manifest.technicalStatus
+      || run.humanReviewStatus !== manifest.humanReviewStatus
+      || run.startedAt !== manifest.startedAt
+      || run.finishedAt !== manifest.finishedAt
+      || canonicalJson(run.changedFiles) !== canonicalJson(manifest.changedFiles)
+      || canonicalJson(run.evidence) !== canonicalJson(manifest.evidence)
+    ) {
+      throw new Error("attempt manifest ExperimentRun fields are inconsistent");
+    }
+    const terminalEvent = manifest.terminalEvent;
+    const expectedEventType = manifest.technicalStatus === "completed" ? "run_completed" : "run_failed";
+    if (
+      (manifest.technicalStatus !== "completed" && manifest.technicalStatus !== "failed")
+      || terminalEvent.type !== expectedEventType
+      || terminalEvent.planId !== plan.id
+      || terminalEvent.planFingerprint !== plan.fingerprint
+      || terminalEvent.plannedRunId !== plannedRun.id
+      || terminalEvent.experimentId !== plannedRun.experimentId
+      || terminalEvent.testCaseId !== plannedRun.testCaseId
+      || terminalEvent.variant !== plannedRun.variant
+      || terminalEvent.repetition !== plannedRun.repetition
+      || terminalEvent.attempt !== manifest.attempt
+      || terminalEvent.timestamp !== manifest.finishedAt
+      || !Number.isInteger(terminalEvent.sequence)
+      || terminalEvent.sequence < 1
+    ) {
+      throw new Error("attempt manifest terminal event is inconsistent");
+    }
+
+    if (manifest.termination.kind === "process_exit") {
+      const expectedStatus = manifest.termination.exitCode === 0 ? "completed" : "failed";
+      if (
+        manifest.technicalStatus !== expectedStatus
+        || manifest.exitCode !== manifest.termination.exitCode
+        || run.exitCode !== manifest.termination.exitCode
+        || manifest.durationMs === null
+        || run.durationMs !== manifest.durationMs
+        || manifest.agent === null
+        || manifest.workspace === null
+        || manifest.artifacts.finalOutput === null
+        || manifest.artifacts.stdout === null
+        || manifest.artifacts.stderr === null
+      ) {
+        throw new Error("process-exit manifest is missing factual execution data");
+      }
+      const expectedConfiguration = configurationEvidenceFingerprint({
+        model: manifest.agent.model,
+        modelOptions: manifest.agent.modelOptions,
+        experiment,
+      });
+      if (manifest.fingerprints.configuration !== expectedConfiguration) {
+        throw new Error("process-exit manifest configuration fingerprint is inconsistent");
+      }
+      if (canonicalJson(manifest.workspace.changedFiles) !== canonicalJson(manifest.changedFiles)) {
+        throw new Error("process-exit manifest workspace changed files are inconsistent");
+      }
+      if (
+        (manifest.artifacts.initialGitDiffFromHead !== null) !== manifest.workspace.initialGitDiffAvailable
+        || (manifest.artifacts.finalGitDiffFromHead !== null) !== manifest.workspace.finalGitDiffAvailable
+      ) {
+        throw new Error("process-exit manifest Git diff availability is inconsistent");
+      }
+      await Promise.all([
+        this.readArtifact(manifest.artifacts.finalOutput),
+        this.readArtifact(manifest.artifacts.stdout),
+        this.readArtifact(manifest.artifacts.stderr),
+        ...(manifest.artifacts.initialGitDiffFromHead
+          ? [this.readArtifact(manifest.artifacts.initialGitDiffFromHead)]
+          : []),
+        ...(manifest.artifacts.finalGitDiffFromHead
+          ? [this.readArtifact(manifest.artifacts.finalGitDiffFromHead)]
+          : []),
+      ]);
+    } else if (manifest.termination.kind === "execution_error") {
+      const errorName = manifest.termination.errorName;
+      if (
+        manifest.technicalStatus !== "failed"
+        || !/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(errorName)
+        || manifest.exitCode !== null
+        || manifest.durationMs !== null
+        || manifest.agent !== null
+        || manifest.workspace !== null
+        || manifest.fingerprints.configuration !== null
+        || manifest.artifacts.finalOutput !== null
+        || manifest.artifacts.stdout !== null
+        || manifest.artifacts.stderr !== null
+        || manifest.artifacts.initialGitDiffFromHead !== null
+        || manifest.artifacts.finalGitDiffFromHead !== null
+        || manifest.changedFiles.length !== 0
+        || run.exitCode !== undefined
+        || run.durationMs !== undefined
+      ) {
+        throw new Error("execution-error manifest fabricates unavailable execution data");
+      }
+      const matchingEvidence = run.evidence.some((evidence) => (
+        evidence.type === "execution-error"
+        && evidence.data?.name === errorName
+      ));
+      if (!matchingEvidence) throw new Error("execution-error manifest lacks its factual execution-error Evidence");
+    } else {
+      throw new Error("attempt manifest has an unknown termination kind");
+    }
   }
 
   private planDirectory(planFingerprint: string): string {

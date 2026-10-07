@@ -489,7 +489,7 @@ describe.sequential("strict isolated runner", () => {
         return manifest!;
       });
       expect(new Set(manifests.map(({ fingerprints }) => fingerprints.target)).size).toBe(1);
-      expect(new Set(manifests.map(({ workspace }) => workspace.initialWorkspaceFingerprint)).size).toBe(1);
+      expect(new Set(manifests.map(({ workspace }) => workspace!.initialWorkspaceFingerprint)).size).toBe(1);
       expect(manifests.map(({ changedFiles }) => changedFiles)).toEqual([
         ["evidence-run-1.txt"],
         ["evidence-run-2.txt"],

@@ -1,4 +1,11 @@
-import type { ExperimentExecutionBackend, ExperimentExecutionSession, BackendRunRequest, BackendRunResult } from "../experiment/execution-backend.js";
+import {
+  LocalRunExecutionError,
+  type ExperimentExecutionBackend,
+  type ExperimentExecutionSession,
+  type BackendRunRequest,
+  type BackendRunResult,
+} from "../experiment/execution-backend.js";
+import type { ExperimentRunEvent } from "../experiment/events.js";
 import type { ExperimentExecutionState } from "../experiment/orchestrator.js";
 import { findPlannedRunContext, type ExperimentExecutionPlan } from "../experiment/plan.js";
 import {
@@ -17,10 +24,20 @@ import {
   type AttemptStartedRecord,
 } from "./schema.js";
 
-interface PendingResult {
+interface PendingAttemptBase {
   readonly request: BackendRunRequest;
-  readonly result: BackendRunResult;
   readonly modelInput: ArtifactReference;
+}
+
+type PendingAttempt = PendingAttemptBase & (
+  | { readonly kind: "process_exit"; readonly result: BackendRunResult }
+  | { readonly kind: "execution_error"; readonly errorName: string }
+);
+
+export interface EvidenceStorageHooks {
+  readonly afterManifestFinalizedBeforeCheckpoint?: (
+    manifest: AttemptManifestRecord,
+  ) => void | Promise<void>;
 }
 
 function attemptKey(plannedRunId: string, attempt: number): string {
@@ -34,7 +51,8 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
   readonly #backend: ExperimentExecutionBackend;
   readonly #store: FilesystemEvidenceStore;
   readonly #plan: ExperimentExecutionPlan;
-  readonly #pending = new Map<string, PendingResult>();
+  readonly #pending = new Map<string, PendingAttempt>();
+  readonly #hooks: EvidenceStorageHooks;
   #targetPath = "";
   #session: ExperimentExecutionSession | undefined;
 
@@ -42,10 +60,12 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
     readonly backend: ExperimentExecutionBackend;
     readonly store: FilesystemEvidenceStore;
     readonly plan: ExperimentExecutionPlan;
+    readonly hooks?: EvidenceStorageHooks;
   }) {
     this.#backend = input.backend;
     this.#store = input.store;
     this.#plan = input.plan;
+    this.#hooks = input.hooks ?? {};
   }
 
   async open(input: Parameters<ExperimentExecutionBackend["open"]>[0]): Promise<ExperimentExecutionSession> {
@@ -81,9 +101,26 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
           baseline: delegate.baseline,
         };
         await this.#store.writeAttemptStarted(started, [this.#targetPath]);
-        const result = await delegate.executeRun(request);
-        this.#pending.set(attemptKey(request.plannedRun.id, request.attempt), { request, result, modelInput });
-        return result;
+        try {
+          const result = await delegate.executeRun(request);
+          this.#pending.set(attemptKey(request.plannedRun.id, request.attempt), {
+            kind: "process_exit",
+            request,
+            result,
+            modelInput,
+          });
+          return result;
+        } catch (error) {
+          if (error instanceof LocalRunExecutionError) {
+            this.#pending.set(attemptKey(request.plannedRun.id, request.attempt), {
+              kind: "execution_error",
+              request,
+              modelInput,
+              errorName: error.name,
+            });
+          }
+          throw error;
+        }
       },
       close: async () => delegate.close(),
     };
@@ -96,33 +133,39 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
       const key = attemptKey(logicalRun.plannedRunId, logicalRun.attempt);
       const pending = this.#pending.get(key);
       if (!pending) continue;
-      await this.#finalize(logicalRun.run, pending);
+      const manifest = await this.#finalize(state, logicalRun.run, pending);
       this.#pending.delete(key);
+      await this.#hooks.afterManifestFinalizedBeforeCheckpoint?.(manifest);
     }
     await this.#store.appendCheckpoint(this.#plan, state, [this.#targetPath]);
   }
 
   async #finalize(
+    state: ExperimentExecutionState,
     experimentRun: ExperimentExecutionState["runs"][number]["run"],
-    pending: PendingResult,
-  ): Promise<void> {
+    pending: PendingAttempt,
+  ): Promise<AttemptManifestRecord> {
     if (!this.#session) throw new Error("recording backend has no active session");
     if (!experimentRun.startedAt || !experimentRun.finishedAt) {
       throw new Error("a finalized ExperimentRun requires startedAt and finishedAt");
     }
-    const { request, result, modelInput } = pending;
+    const { request, modelInput } = pending;
     const { experiment, testCase } = findPlannedRunContext(this.#plan, request.plannedRun);
-    const [finalOutput, stdout, stderr, initialGitDiffFromHead, finalGitDiffFromHead] = await Promise.all([
-      this.#store.putArtifact(result.transcript.finalOutput, TEXT_MEDIA_TYPE, [this.#targetPath]),
-      this.#store.putArtifact(result.transcript.stdout, TEXT_MEDIA_TYPE, [this.#targetPath]),
-      this.#store.putArtifact(result.transcript.stderr, TEXT_MEDIA_TYPE, [this.#targetPath]),
-      result.workspace.initialGitDiffFromHead === null
-        ? Promise.resolve(null)
-        : this.#store.putArtifact(result.workspace.initialGitDiffFromHead, DIFF_MEDIA_TYPE, [this.#targetPath]),
-      result.workspace.finalGitDiffFromHead === null
-        ? Promise.resolve(null)
-        : this.#store.putArtifact(result.workspace.finalGitDiffFromHead, DIFF_MEDIA_TYPE, [this.#targetPath]),
-    ]);
+    const terminalEvent = this.#terminalEvent(state, request, experimentRun.technicalStatus);
+    const result = pending.kind === "process_exit" ? pending.result : null;
+    const [finalOutput, stdout, stderr, initialGitDiffFromHead, finalGitDiffFromHead] = result
+      ? await Promise.all([
+          this.#store.putArtifact(result.transcript.finalOutput, TEXT_MEDIA_TYPE, [this.#targetPath]),
+          this.#store.putArtifact(result.transcript.stdout, TEXT_MEDIA_TYPE, [this.#targetPath]),
+          this.#store.putArtifact(result.transcript.stderr, TEXT_MEDIA_TYPE, [this.#targetPath]),
+          result.workspace.initialGitDiffFromHead === null
+            ? Promise.resolve(null)
+            : this.#store.putArtifact(result.workspace.initialGitDiffFromHead, DIFF_MEDIA_TYPE, [this.#targetPath]),
+          result.workspace.finalGitDiffFromHead === null
+            ? Promise.resolve(null)
+            : this.#store.putArtifact(result.workspace.finalGitDiffFromHead, DIFF_MEDIA_TYPE, [this.#targetPath]),
+        ])
+      : [null, null, null, null, null];
     const manifest: AttemptManifestRecord = {
       format: EVIDENCE_STORE_FORMAT,
       version: EVIDENCE_STORE_VERSION,
@@ -140,25 +183,30 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
       humanReviewStatus: experimentRun.humanReviewStatus,
       startedAt: experimentRun.startedAt,
       finishedAt: experimentRun.finishedAt,
-      durationMs: result.durationMs,
-      exitCode: result.exitCode,
-      changedFiles: result.changedFiles,
+      durationMs: result?.durationMs ?? null,
+      exitCode: result?.exitCode ?? null,
+      changedFiles: result?.changedFiles ?? [],
       fingerprints: {
         prompt: promptEvidenceFingerprint(experiment.promptVersion),
         testCase: caseEvidenceFingerprint(testCase),
         target: targetEvidenceFingerprint(this.#plan.target, this.#session.baseline),
         runner: runnerEvidenceFingerprint(this.#session.baseline),
-        configuration: configurationEvidenceFingerprint({
-          model: result.transcript.model,
-          modelOptions: result.transcript.modelOptions,
-          experiment,
-        }),
+        configuration: result
+          ? configurationEvidenceFingerprint({
+              model: result.transcript.model,
+              modelOptions: result.transcript.modelOptions,
+              experiment,
+            })
+          : null,
         plan: this.#plan.fingerprint,
       },
-      agent: {
-        model: result.transcript.model,
-        modelOptions: result.transcript.modelOptions,
-      },
+      termination: pending.kind === "process_exit"
+        ? { kind: "process_exit", exitCode: pending.result.exitCode }
+        : { kind: "execution_error", errorName: pending.errorName },
+      terminalEvent,
+      agent: result
+        ? { model: result.transcript.model, modelOptions: result.transcript.modelOptions }
+        : null,
       artifacts: {
         modelInput,
         finalOutput,
@@ -168,14 +216,16 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
         finalGitDiffFromHead,
       },
       baseline: this.#session.baseline,
-      workspace: {
-        initialWorkspaceFingerprint: result.workspace.initialWorkspaceFingerprint,
-        finalWorkspaceFingerprint: result.workspace.finalWorkspaceFingerprint,
-        changes: result.workspace.changes,
-        changedFiles: result.workspace.changedFiles,
-        initialGitDiffAvailable: result.workspace.initialGitDiffFromHead !== null,
-        finalGitDiffAvailable: result.workspace.finalGitDiffFromHead !== null,
-      },
+      workspace: result
+        ? {
+            initialWorkspaceFingerprint: result.workspace.initialWorkspaceFingerprint,
+            finalWorkspaceFingerprint: result.workspace.finalWorkspaceFingerprint,
+            changes: result.workspace.changes,
+            changedFiles: result.workspace.changedFiles,
+            initialGitDiffAvailable: result.workspace.initialGitDiffFromHead !== null,
+            finalGitDiffAvailable: result.workspace.finalGitDiffFromHead !== null,
+          }
+        : null,
       evidence: experimentRun.evidence,
       experiment,
       plannedRun: request.plannedRun,
@@ -184,5 +234,26 @@ export class RecordingExperimentExecutionBackend implements ExperimentExecutionB
       promptVersion: experiment.promptVersion,
     };
     await this.#store.finalizeAttempt(manifest, [this.#targetPath]);
+    return manifest;
+  }
+
+  #terminalEvent(
+    state: ExperimentExecutionState,
+    request: BackendRunRequest,
+    technicalStatus: string,
+  ): AttemptManifestRecord["terminalEvent"] {
+    const expectedType = technicalStatus === "completed" ? "run_completed" : "run_failed";
+    for (let index = state.events.length - 1; index >= 0; index -= 1) {
+      const event = state.events[index]!;
+      if (
+        event.type === expectedType
+        && "plannedRunId" in event
+        && event.plannedRunId === request.plannedRun.id
+        && event.attempt === request.attempt
+      ) {
+        return event as ExperimentRunEvent & { type: "run_completed" | "run_failed" };
+      }
+    }
+    throw new Error(`terminal event missing for ${request.plannedRun.id}/${request.attempt}`);
   }
 }

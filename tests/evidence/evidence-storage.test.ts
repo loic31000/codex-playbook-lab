@@ -9,6 +9,7 @@ import {
   canonicalJson,
   createExperimentExecutionPlan,
   sha256Exact,
+  validateExperimentExecutionState,
   type BackendRunRequest,
   type ExecutionBaseline,
   type ExperimentAgentExecutor,
@@ -294,12 +295,13 @@ describe("filesystem evidence storage", () => {
         humanReviewStatus: "pending_review",
         durationMs: 17,
         exitCode: 0,
+        termination: { kind: "process_exit", exitCode: 0 },
         changedFiles: [`src/run-${plannedRun.ordinal}.txt`],
         agent: { model: "fake-agent-model" },
       });
       expect(manifest.experimentRun.evidence).toHaveLength(1);
-      expect(manifest.workspace.initialGitDiffAvailable).toBe(true);
-      expect(manifest.workspace.finalGitDiffAvailable).toBe(true);
+      expect(manifest.workspace!.initialGitDiffAvailable).toBe(true);
+      expect(manifest.workspace!.finalGitDiffAvailable).toBe(true);
       expect(manifest.workspace).not.toHaveProperty("initialGitDiffFromHead");
       expect(manifest.workspace).not.toHaveProperty("finalGitDiffFromHead");
       expect(manifest.testCase).toEqual(plan.experiments[0]!.testCases[0]);
@@ -307,11 +309,11 @@ describe("filesystem evidence storage", () => {
         ? generatedInput
         : `${promptContent}\n\n---\n\n${generatedInput}`;
       expect((await store.readArtifact(manifest.artifacts.modelInput)).toString("utf8")).toBe(expectedInput);
-      expect((await store.readArtifact(manifest.artifacts.finalOutput)).toString("utf8"))
+      expect((await store.readArtifact(manifest.artifacts.finalOutput!)).toString("utf8"))
         .toBe(`final:${plannedRun.variant}:${expectedInput}`);
-      expect((await store.readArtifact(manifest.artifacts.stdout)).toString("utf8"))
+      expect((await store.readArtifact(manifest.artifacts.stdout!)).toString("utf8"))
         .toBe(`stdout:${plannedRun.ordinal}\n`);
-      expect((await store.readArtifact(manifest.artifacts.stderr)).toString("utf8"))
+      expect((await store.readArtifact(manifest.artifacts.stderr!)).toString("utf8"))
         .toBe(`stderr:${plannedRun.ordinal}\n`);
       expect((await store.readArtifact(manifest.artifacts.initialGitDiffFromHead!)).toString("utf8")).toBe("");
       const finalDiff = (await store.readArtifact(manifest.artifacts.finalGitDiffFromHead!)).toString("utf8");
@@ -324,7 +326,7 @@ describe("filesystem evidence storage", () => {
         runner: runnerEvidenceFingerprint(executionBaseline()),
         configuration: configurationEvidenceFingerprint({
           model: "fake-agent-model",
-          modelOptions: manifest.agent.modelOptions,
+          modelOptions: manifest.agent!.modelOptions,
           experiment: plan.experiments[0]!,
         }),
         plan: plan.fingerprint,
@@ -386,7 +388,7 @@ describe("filesystem evidence storage", () => {
     expect((await reopened.readAttempt(plan.fingerprint, firstRun.id, 2)).manifest?.technicalStatus).toBe("completed");
   });
 
-  it("falls back to the newest valid checkpoint when a newer file is truncated", async () => {
+  it("recovers past a corrupt high checkpoint and keeps later nine-digit checkpoints visible", async () => {
     const { store, storeRoot, targetPath } = await temporaryStore();
     const plan = evidencePlan("corrupt-checkpoint-plan");
     await runStoredExperimentPlan({
@@ -403,6 +405,241 @@ describe("filesystem evidence storage", () => {
     const after = await store.readLatestCheckpoint(plan.fingerprint);
     expect(after.checkpoint).toEqual(before.checkpoint);
     expect(after.invalidCheckpointRefs).toEqual([corruptRef]);
+
+    let replayed = 0;
+    const reopened = await openEvidenceStore(storeRoot);
+    const resumed = await runStoredExperimentPlan({
+      store: reopened,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath,
+      executor: {
+        async execute() {
+          replayed += 1;
+          return {
+            exitCode: 0,
+            transcript: {
+              model: "must-not-run",
+              modelOptions: {},
+              finalOutput: "must-not-run",
+              stdout: "",
+              stderr: "",
+            },
+          };
+        },
+      },
+      resume: true,
+      now: deterministicClock(),
+    });
+    expect(resumed.status).toBe("completed");
+    expect(replayed).toBe(0);
+    const recovered = await reopened.readLatestCheckpoint(plan.fingerprint);
+    expect(recovered.checkpoint?.sequence).toBeGreaterThan(99_999_999);
+    expect(recovered.checkpoint?.state.status).toBe("completed");
+    expect(recovered.invalidCheckpointRefs).toContain(corruptRef);
+    const names = await fs.readdir(path.join(storeRoot, "plans", plan.fingerprint, "checkpoints"));
+    expect(names.some((name) => /^10000000\d\.json$/.test(name))).toBe(true);
+  });
+
+  it("finalizes LocalRunExecutionError without inventing a transcript and never replays it", async () => {
+    const { store, storeRoot, targetPath } = await temporaryStore();
+    const plan = evidencePlan("terminal-local-error-plan");
+    let executions = 0;
+    const state = await runStoredExperimentPlan({
+      store,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath,
+      executor: {
+        async execute(request) {
+          executions += 1;
+          if (request.plannedRun.ordinal === 1) throw new Error("untrusted local failure details");
+          return richExecutor().execute(request);
+        },
+      },
+      now: deterministicClock(),
+    });
+    expect(executions).toBe(2);
+    expect(state.status).toBe("completed_with_failures");
+    expect(state.runs.map(({ run }) => run.technicalStatus)).toEqual(["failed", "completed"]);
+
+    const firstRun = plan.plannedRuns[0]!;
+    const failed = await store.readAttempt(plan.fingerprint, firstRun.id, 1);
+    expect(failed.summary.status).toBe("finalized");
+    expect(failed.manifest).toMatchObject({
+      technicalStatus: "failed",
+      termination: { kind: "execution_error", errorName: "LocalRunExecutionError" },
+      exitCode: null,
+      durationMs: null,
+      agent: null,
+      workspace: null,
+      changedFiles: [],
+      artifacts: {
+        finalOutput: null,
+        stdout: null,
+        stderr: null,
+        initialGitDiffFromHead: null,
+        finalGitDiffFromHead: null,
+      },
+    });
+    expect(failed.manifest?.fingerprints.configuration).toBeNull();
+    expect(failed.manifest?.evidence).toEqual([
+      expect.objectContaining({
+        type: "execution-error",
+        data: { name: "LocalRunExecutionError" },
+      }),
+    ]);
+    expect(JSON.stringify(failed.manifest)).not.toContain("untrusted local failure details");
+
+    let replayed = 0;
+    const reopened = await openEvidenceStore(storeRoot);
+    const resumed = await runStoredExperimentPlan({
+      store: reopened,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath,
+      executor: {
+        async execute() {
+          replayed += 1;
+          throw new Error("terminal attempts must not run again");
+        },
+      },
+      resume: true,
+      now: deterministicClock(),
+    });
+    expect(resumed.status).toBe("completed_with_failures");
+    expect(replayed).toBe(0);
+    expect(await reopened.listRunAttempts(plan.fingerprint, firstRun.id)).toEqual([
+      expect.objectContaining({ attempt: 1, status: "finalized" }),
+    ]);
+  });
+
+  it("reconciles a finalized manifest ahead of its checkpoint without replaying attempt 1", async () => {
+    const { store, storeRoot, targetPath } = await temporaryStore();
+    const plan = evidencePlan("manifest-ahead-plan");
+    let firstProcessCalls = 0;
+    let failedAtManifest = false;
+    await expect(runStoredExperimentPlan({
+      store,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath,
+      executor: {
+        async execute(request) {
+          firstProcessCalls += 1;
+          return richExecutor().execute(request);
+        },
+      },
+      storageHooks: {
+        afterManifestFinalizedBeforeCheckpoint() {
+          if (!failedAtManifest) {
+            failedAtManifest = true;
+            throw new Error("simulated crash after immutable manifest");
+          }
+        },
+      },
+      now: deterministicClock(),
+    })).rejects.toThrow(/simulated crash after immutable manifest/);
+    expect(firstProcessCalls).toBe(1);
+
+    const firstRun = plan.plannedRuns[0]!;
+    const durableBeforeRecovery = await store.readLatestCheckpoint(plan.fingerprint);
+    expect(durableBeforeRecovery.checkpoint?.state.runs[0]).toMatchObject({
+      attempt: 1,
+      run: { technicalStatus: "running" },
+    });
+    expect((await store.readAttempt(plan.fingerprint, firstRun.id, 1)).manifest?.technicalStatus).toBe("completed");
+    const sequenceBeforeRecovery = durableBeforeRecovery.checkpoint!.sequence;
+
+    const reopened = await openEvidenceStore(storeRoot);
+    const resumedOrdinals: number[] = [];
+    const resumed = await runStoredExperimentPlan({
+      store: reopened,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath,
+      executor: {
+        async execute(request) {
+          resumedOrdinals.push(request.plannedRun.ordinal);
+          return richExecutor().execute(request);
+        },
+      },
+      resume: true,
+      now: deterministicClock(),
+    });
+    expect(resumed.status).toBe("completed");
+    expect(resumedOrdinals).toEqual([2]);
+    expect(resumed.runs[0]).toMatchObject({ attempt: 1, run: { technicalStatus: "completed" } });
+    expect(await reopened.listRunAttempts(plan.fingerprint, firstRun.id)).toEqual([
+      expect.objectContaining({ attempt: 1, status: "finalized" }),
+    ]);
+    validateExperimentExecutionState(plan, resumed);
+
+    const recoveryFilename = `${String(sequenceBeforeRecovery + 1).padStart(8, "0")}.json`;
+    const recoveryRecord = JSON.parse(await fs.readFile(path.join(
+      storeRoot,
+      "plans",
+      plan.fingerprint,
+      "checkpoints",
+      recoveryFilename,
+    ), "utf8")) as { state: { runs: Array<{ attempt: number; run: { technicalStatus: string } }>; events: Array<{ type: string }> } };
+    expect(recoveryRecord.state.runs[0]).toMatchObject({ attempt: 1, run: { technicalStatus: "completed" } });
+    expect(recoveryRecord.state.events.at(-1)?.type).toBe("run_completed");
+  });
+
+  it("propagates operational checkpoint and attempt I/O failures instead of falling back", async () => {
+    const first = await temporaryStore();
+    const plan = evidencePlan("checkpoint-io-plan");
+    await runStoredExperimentPlan({
+      store: first.store,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath: first.targetPath,
+      executor: richExecutor(),
+      now: deterministicClock(),
+    });
+    await fs.mkdir(path.join(first.storeRoot, "plans", plan.fingerprint, "checkpoints", "100000000.json"));
+    await expect(first.store.readLatestCheckpoint(plan.fingerprint)).rejects.toThrow();
+
+    const second = await temporaryStore();
+    const secondPlan = evidencePlan("attempt-io-plan");
+    await runStoredExperimentPlan({
+      store: second.store,
+      plan: secondPlan,
+      backend: new EvidenceFakeBackend(),
+      targetPath: second.targetPath,
+      executor: richExecutor(),
+      now: deterministicClock(),
+    });
+    const plannedRun = secondPlan.plannedRuns[0]!;
+    const attempt = await second.store.listRunAttempts(secondPlan.fingerprint, plannedRun.id);
+    const manifestPath = path.join(second.storeRoot, ...attempt[0]!.manifestRef!.split("/"));
+    await fs.rename(manifestPath, `${manifestPath}.saved`);
+    await fs.mkdir(manifestPath);
+    await expect(second.store.listRunAttempts(secondPlan.fingerprint, plannedRun.id)).rejects.toThrow(/not a regular file/);
+  });
+
+  it("rejects manifest mismatches against started.json and the immutable plan", async () => {
+    const { store, targetPath } = await temporaryStore();
+    const plan = evidencePlan("manifest-mismatch-plan");
+    await runStoredExperimentPlan({
+      store,
+      plan,
+      backend: new EvidenceFakeBackend(),
+      targetPath,
+      executor: richExecutor(),
+      now: deterministicClock(),
+    });
+    const original = (await store.readAttempt(plan.fingerprint, plan.plannedRuns[0]!.id, 1)).manifest!;
+    const mismatch = async (mutate: (record: Record<string, any>) => void, pattern: RegExp) => {
+      const forged = structuredClone(original) as unknown as Record<string, any>;
+      mutate(forged);
+      await expect(store.finalizeAttempt(forged as never, [targetPath])).rejects.toThrow(pattern);
+    };
+    await mismatch((record) => { record.variant = "treatment"; }, /variant differs/);
+    await mismatch((record) => { record.testCaseId = "other-case"; }, /testCaseId differs/);
+    await mismatch((record) => { record.baseline.workspaceFingerprint = "other-workspace"; }, /baseline/);
+    await mismatch((record) => { record.fingerprints.target = "0".repeat(64); }, /fingerprints/);
   });
 
   it("makes blobs, plans and finalized manifests write-once with exact idempotence", async () => {
@@ -432,7 +669,11 @@ describe("filesystem evidence storage", () => {
     await isolated.store.finalizeAttempt(attempt.manifest!, [isolated.targetPath]);
     await expect(isolated.store.finalizeAttempt({
       ...attempt.manifest!,
-      durationMs: attempt.manifest!.durationMs + 1,
+      durationMs: attempt.manifest!.durationMs! + 1,
+      experimentRun: {
+        ...attempt.manifest!.experimentRun,
+        durationMs: attempt.manifest!.durationMs! + 1,
+      },
     }, [isolated.targetPath])).rejects.toThrow(/different content/);
   });
 
@@ -507,8 +748,8 @@ describe("filesystem evidence storage", () => {
     const stored = await store.readAttempt(plan.fingerprint, plan.plannedRuns[0]!.id, 1);
     expect(stored.manifest?.artifacts.initialGitDiffFromHead).toBeNull();
     expect(stored.manifest?.artifacts.finalGitDiffFromHead).toBeNull();
-    expect(stored.manifest?.workspace.changes).toHaveLength(1);
-    expect(stored.manifest?.workspace.initialGitDiffAvailable).toBe(false);
-    expect(stored.manifest?.workspace.finalGitDiffAvailable).toBe(false);
+    expect(stored.manifest?.workspace!.changes).toHaveLength(1);
+    expect(stored.manifest?.workspace!.initialGitDiffAvailable).toBe(false);
+    expect(stored.manifest?.workspace!.finalGitDiffAvailable).toBe(false);
   });
 });

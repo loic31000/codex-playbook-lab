@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
 
+function compareCanonicalKeys(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 function canonicalValue(value: unknown): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -7,7 +13,7 @@ function canonicalValue(value: unknown): unknown {
   if (typeof value !== "object") throw new TypeError("canonical JSON accepts only JSON values");
   return Object.fromEntries(
     Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right, "en"))
+      .sort(([left], [right]) => compareCanonicalKeys(left, right))
       .map(([key, entry]) => [key, canonicalValue(entry)]),
   );
 }

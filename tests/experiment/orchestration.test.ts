@@ -11,8 +11,10 @@ import {
   EXPERIMENT_INPUT_SEPARATOR,
   LocalRunExecutionError,
   buildExperimentModelInput,
+  canonicalJson,
   createExperimentExecutionPlan,
   runExperimentPlan,
+  sha256Canonical,
   type BackendRunRequest,
   type ExecutionBaseline,
   type ExperimentAgentExecutor,
@@ -205,7 +207,112 @@ async function interruptedExecution(plan = planFromRaw()): Promise<{
   return { state, clock };
 }
 
+function mutable(value: unknown): Record<string, unknown> {
+  return value as Record<string, unknown>;
+}
+
+const previousStateCorruptions: ReadonlyArray<readonly [
+  string,
+  (state: ExperimentExecutionState) => void,
+]> = [
+  ["pending run changed to completed", (state) => {
+    mutable(state.runs[5]!.run).technicalStatus = "completed";
+  }],
+  ["pending run changed to completed with forged attempt", (state) => {
+    mutable(state.runs[5]!.run).technicalStatus = "completed";
+    mutable(state.runs[5]).attempt = 1;
+  }],
+  ["ExperimentRun id", (state) => {
+    mutable(state.runs[0]!.run).id = "forged-run";
+  }],
+  ["ExperimentRun experimentId", (state) => {
+    mutable(state.runs[0]!.run).experimentId = "forged-experiment";
+  }],
+  ["ExperimentRun testCaseId", (state) => {
+    mutable(state.runs[0]!.run).testCaseId = "forged-case";
+  }],
+  ["ExperimentRun technicalStatus", (state) => {
+    mutable(state.runs[0]!.run).technicalStatus = "forged-status";
+  }],
+  ["ExperimentRun humanReviewStatus", (state) => {
+    mutable(state.runs[0]!.run).humanReviewStatus = "automatic-winner";
+  }],
+  ["logical wrapper plannedRunId", (state) => {
+    mutable(state.runs[0]).plannedRunId = "forged-planned-run";
+  }],
+  ["logical wrapper experimentId", (state) => {
+    mutable(state.runs[0]).experimentId = "forged-experiment";
+  }],
+  ["logical wrapper testCaseId", (state) => {
+    mutable(state.runs[0]).testCaseId = "forged-case";
+  }],
+  ["logical wrapper promptVersionId", (state) => {
+    mutable(state.runs[0]).promptVersionId = "forged-prompt-version";
+  }],
+  ["logical wrapper variant", (state) => {
+    mutable(state.runs[0]).variant = "treatment";
+  }],
+  ["logical wrapper repetition", (state) => {
+    mutable(state.runs[0]).repetition = 99;
+  }],
+  ["logical wrapper caseInputFingerprint", (state) => {
+    mutable(state.runs[0]).caseInputFingerprint = "forged-fingerprint";
+  }],
+  ["negative attempt", (state) => {
+    mutable(state.runs[0]).attempt = -1;
+  }],
+  ["completed with attempt 0", (state) => {
+    mutable(state.runs[0]).attempt = 0;
+  }],
+  ["pending with a positive attempt", (state) => {
+    mutable(state.runs[5]).attempt = 1;
+  }],
+  ["started state without baseline", (state) => {
+    delete mutable(state).baseline;
+  }],
+  ["baseline target", (state) => {
+    mutable(state.baseline!).target = { id: "forged-target", source: "git", revision: "abc123" };
+  }],
+  ["event planFingerprint", (state) => {
+    mutable(state.events[0]).planFingerprint = "forged-plan-fingerprint";
+  }],
+  ["event planId", (state) => {
+    mutable(state.events[0]).planId = "forged-plan";
+  }],
+  ["event timestamp", (state) => {
+    mutable(state.events[0]).timestamp = "not-an-iso-timestamp";
+  }],
+  ["run event plannedRunId", (state) => {
+    const event = state.events.find(({ type }) => type === "run_started")!;
+    mutable(event).plannedRunId = "unknown-planned-run";
+  }],
+  ["run event variant and repetition", (state) => {
+    const event = state.events.find(({ type }) => type === "run_started")!;
+    mutable(event).variant = "treatment";
+    mutable(event).repetition = 99;
+  }],
+  ["run event experimentId and testCaseId", (state) => {
+    const event = state.events.find(({ type }) => type === "run_started")!;
+    mutable(event).experimentId = "forged-experiment";
+    mutable(event).testCaseId = "forged-case";
+  }],
+  ["run event attempt", (state) => {
+    const event = state.events.find(({ type }) => type === "run_started")!;
+    mutable(event).attempt = 0;
+  }],
+];
+
 describe("experiment execution plan", () => {
+  it("sorts canonical keys by code-unit order without locale or Unicode normalization", () => {
+    const first = { "\u4e2d": 6, "\u00e9": 4, a: 1, "\u03a9": 5, z: 2, "\u00e4": 3 };
+    const second = { "\u00e4": 3, z: 2, "\u03a9": 5, a: 1, "\u00e9": 4, "\u4e2d": 6 };
+    const expected = '{"a":1,"z":2,"\u00e4":3,"\u00e9":4,"\u03a9":5,"\u4e2d":6}';
+    expect(canonicalJson(first)).toBe(expected);
+    expect(canonicalJson(second)).toBe(expected);
+    expect(sha256Canonical(first)).toBe(sha256Canonical(second));
+    expect(canonicalJson({ "\u00e9": 1 })).not.toBe(canonicalJson({ "e\u0301": 1 }));
+  });
+
   it("est déterministe, canonique et contient exactement douze PlannedRun ordonnés", () => {
     const first = planFromRaw();
     const second = planFromRaw();
@@ -328,6 +435,64 @@ describe("experiment execution plan", () => {
 });
 
 describe("experiment orchestration state machine", () => {
+  it.each(previousStateCorruptions)(
+    "refuse previousState corrompu avant backend.open(): %s",
+    async (_label, corrupt) => {
+      const plan = planFromRaw();
+      const { state } = await interruptedExecution(plan);
+      const corrupted = JSON.parse(JSON.stringify(state)) as ExperimentExecutionState;
+      corrupt(corrupted);
+      const backend = new FakeBackend(state.baseline);
+      let agentCalls = 0;
+      await expect(runExperimentPlan({
+        plan,
+        backend,
+        targetPath: "C:/explicit-target",
+        previousState: corrupted,
+        executor: {
+          async execute() {
+            agentCalls += 1;
+            return { exitCode: 0 };
+          },
+        },
+      })).rejects.toThrow();
+      expect(backend.openCount).toBe(0);
+      expect(agentCalls).toBe(0);
+    },
+  );
+
+  it("rejects a forged run_skipped attempt before backend.open()", async () => {
+    const plan = planFromRaw();
+    const { state: interrupted, clock } = await interruptedExecution(plan);
+    const completed = await runExperimentPlan({
+      plan,
+      backend: new FakeBackend(interrupted.baseline),
+      targetPath: "C:/explicit-target",
+      previousState: interrupted,
+      executor: successfulExecutor,
+      now: clock,
+    });
+    const corrupted = JSON.parse(JSON.stringify(completed)) as ExperimentExecutionState;
+    const skipped = corrupted.events.find(({ type }) => type === "run_skipped")!;
+    mutable(skipped).attempt = 99;
+    const backend = new FakeBackend(completed.baseline);
+    let agentCalls = 0;
+    await expect(runExperimentPlan({
+      plan,
+      backend,
+      targetPath: "C:/explicit-target",
+      previousState: corrupted,
+      executor: {
+        async execute() {
+          agentCalls += 1;
+          return { exitCode: 0 };
+        },
+      },
+    })).rejects.toThrow(/skipped event attempt|attempt exceeds/);
+    expect(backend.openCount).toBe(0);
+    expect(agentCalls).toBe(0);
+  });
+
   it("exécute les douze runs logiques et conserve pending_review", async () => {
     const plan = planFromRaw();
     const backend = new FakeBackend();
@@ -354,6 +519,37 @@ describe("experiment orchestration state machine", () => {
       "plan_completed",
     ]);
     expect(JSON.stringify(state)).not.toMatch(/winner|betterPrompt|worsePrompt|verdict|score|approved|rejected/i);
+  });
+
+  it("preserves a valid future human review without rewriting it", async () => {
+    const plan = planFromRaw();
+    const state = await runExperimentPlan({
+      plan,
+      backend: new FakeBackend(),
+      targetPath: "C:/explicit-target",
+      executor: successfulExecutor,
+      now: deterministicClock(),
+    });
+    const reviewed = JSON.parse(JSON.stringify(state)) as ExperimentExecutionState;
+    const reviewedRun = mutable(reviewed.runs[0]!.run);
+    reviewedRun.humanReviewStatus = "approved";
+    reviewedRun.reviewer = "human-reviewer";
+    reviewedRun.reviewedAt = "2026-10-07T11:00:00.000Z";
+    const backend = new FakeBackend(reviewed.baseline);
+    const resumed = await runExperimentPlan({
+      plan,
+      backend,
+      targetPath: "C:/explicit-target",
+      previousState: reviewed,
+      executor: successfulExecutor,
+      now: deterministicClock(),
+    });
+    expect(resumed.runs[0]!.run).toMatchObject({
+      humanReviewStatus: "approved",
+      reviewer: "human-reviewer",
+      reviewedAt: "2026-10-07T11:00:00.000Z",
+    });
+    expect(backend.requests).toHaveLength(0);
   });
 
   it("interrompt le run 5, laisse les suivants pending puis reprend sans dupliquer", async () => {
@@ -399,7 +595,11 @@ describe("experiment orchestration state machine", () => {
     const plan = planFromRaw();
     const { state } = await interruptedExecution(plan);
     const inherited = JSON.parse(JSON.stringify(state)) as ExperimentExecutionState;
-    (inherited.runs[4]!.run as { technicalStatus: string }).technicalStatus = "running";
+    const inheritedRun = mutable(inherited.runs[4]!.run);
+    inheritedRun.technicalStatus = "running";
+    delete inheritedRun.finishedAt;
+    mutable(inherited).status = "running";
+    mutable(inherited).events = inherited.events.slice(0, -2);
     const resumed = await runExperimentPlan({
       plan,
       backend: new FakeBackend(state.baseline),

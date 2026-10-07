@@ -513,7 +513,7 @@ export function createEvidence(value: unknown): Evidence {
   return output as unknown as Evidence;
 }
 
-function parseExperimentRun(value: unknown): ExperimentRun {
+export function parseExperimentRun(value: unknown): ExperimentRun {
   const input = asRecord(value, "run");
   assertOnlyKeys(
     input,

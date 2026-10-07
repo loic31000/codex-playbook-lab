@@ -26,7 +26,7 @@ let initialSourceState: Awaited<ReturnType<typeof captureSourceState>>;
 
 function createRunner(): StrictRunner {
   return new StrictRunner({
-    hostCodexVersionOutput: "codex-cli 0.160.0",
+    trustedHostCodexVersionEvidence: "codex-cli 0.160.0",
     labRoot,
   });
 }
@@ -61,11 +61,13 @@ beforeAll(async () => {
   await fs.mkdir(path.join(targetRoot, "src"));
   await fs.writeFile(path.join(targetRoot, "package.json"), '{"name":"strict-target","private":true}\n', "utf8");
   await fs.writeFile(path.join(targetRoot, "src", "value.txt"), "initial\n", "utf8");
+  await fs.writeFile(path.join(targetRoot, "src", "agent-target.txt"), "initial agent target\n", "utf8");
   await git("init", "--quiet");
   await git("config", "user.name", "Strict Runner Test");
   await git("config", "user.email", "strict-runner@example.invalid");
   await git("add", "-A");
   await git("-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "initial");
+  await fs.writeFile(path.join(targetRoot, "src", "value.txt"), "preexisting tracked modification\n", "utf8");
   await fs.writeFile(path.join(targetRoot, "preexisting-untracked.txt"), "preexisting\n", "utf8");
   initialSourceState = await captureSourceState(targetRoot);
   if (dockerAvailable) await buildStrictRunnerImage({ dockerDirectory });
@@ -114,6 +116,41 @@ describe.sequential("strict isolated runner", () => {
       target: { id: "lab", source: "git" },
       targetPath: labRoot,
     })).rejects.toThrow(/forbidden host path/);
+  });
+
+  it("refuse un alias canonique exterieur qui pointe vers le Lab", async () => {
+    const runner = createRunner();
+    const aliasRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-strict-alias-"));
+    const alias = path.join(aliasRoot, "lab-alias");
+    try {
+      await fs.symlink(labRoot, alias, process.platform === "win32" ? "junction" : "dir");
+      await expect(runner.prepare({
+        target: { id: "lab-alias", source: "filesystem" },
+        targetPath: alias,
+      })).rejects.toThrow(/forbidden host path/);
+    } finally {
+      await fs.rm(aliasRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuse un symlink interne qui exposerait du contenu externe", async () => {
+    const runner = createRunner();
+    const externalRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-strict-external-"));
+    const externalSecret = `EXTERNAL_CONTENT_${crypto.randomUUID().replaceAll("-", "").toUpperCase()}`;
+    const link = path.join(targetRoot, "external-link");
+    try {
+      await fs.writeFile(path.join(externalRoot, "outside.txt"), `${externalSecret}\n`, "utf8");
+      await fs.symlink(externalRoot, link, process.platform === "win32" ? "junction" : "dir");
+      await expect(runner.prepare({
+        target: { id: "external-link", source: "filesystem" },
+        targetPath: targetRoot,
+      })).rejects.toThrow(/symlink outside its canonical root/);
+      expect(await fs.readFile(path.join(externalRoot, "outside.txt"), "utf8")).toBe(`${externalSecret}\n`);
+    } finally {
+      await fs.unlink(link).catch(() => undefined);
+      await fs.rm(externalRoot, { recursive: true, force: true });
+    }
+    expect(await strictResources()).toEqual({ containers: [], volumes: [] });
   });
 
   it("produit une definition stdio stricte sans port ni bind mount", () => {
@@ -224,19 +261,39 @@ describe.sequential("strict isolated runner", () => {
         expect(baseline.initialState.gitHead).toBe(treatment.initialState.gitHead);
         expect(baseline.initialState.gitTree).toBe(treatment.initialState.gitTree);
         expect(baseline.initialState.gitStatus).toBe(treatment.initialState.gitStatus);
+        expect(baseline.initialState.gitStatus).toContain("src/value.txt");
         expect(baseline.initialState.gitStatus).toContain("preexisting-untracked.txt");
         await baseline.start();
         await treatment.start();
-        expect((await baseline.exec(["sh", "-lc", "printf baseline > /workspace/baseline-only.txt"])).code).toBe(0);
+        expect((await baseline.exec([
+          "sh", "-lc",
+          "printf baseline > /workspace/baseline-only.txt && printf baseline-modified > /workspace/src/agent-target.txt",
+        ])).code).toBe(0);
         expect((await treatment.exec(["test", "!", "-e", "/workspace/baseline-only.txt"])).code).toBe(0);
-        expect((await treatment.exec(["sh", "-lc", "printf treatment > /workspace/treatment-only.txt"])).code).toBe(0);
+        expect((await treatment.exec([
+          "sh", "-lc",
+          "printf treatment > /workspace/treatment-only.txt && printf treatment-modified > /workspace/src/agent-target.txt",
+        ])).code).toBe(0);
         expect((await baseline.exec(["test", "!", "-e", "/workspace/treatment-only.txt"])).code).toBe(0);
         const baselineResult = await baseline.captureResult();
         const treatmentResult = await treatment.captureResult();
-        expect(baselineResult.changedFiles).toEqual(["baseline-only.txt"]);
-        expect(treatmentResult.changedFiles).toEqual(["treatment-only.txt"]);
-        expect(baselineResult.diff).toContain("baseline-only.txt");
-        expect(treatmentResult.diff).toContain("treatment-only.txt");
+        expect(baselineResult.changedFiles).toEqual(["baseline-only.txt", "src/agent-target.txt"]);
+        expect(treatmentResult.changedFiles).toEqual(["src/agent-target.txt", "treatment-only.txt"]);
+        expect(baselineResult.changes.map(({ path: pathname, status }) => ({ path: pathname, status }))).toEqual([
+          { path: "baseline-only.txt", status: "added" },
+          { path: "src/agent-target.txt", status: "modified" },
+        ]);
+        expect(treatmentResult.changes.map(({ path: pathname, status }) => ({ path: pathname, status }))).toEqual([
+          { path: "src/agent-target.txt", status: "modified" },
+          { path: "treatment-only.txt", status: "added" },
+        ]);
+        expect(baselineResult.changedFiles).not.toContain("src/value.txt");
+        expect(baselineResult.changedFiles).not.toContain("preexisting-untracked.txt");
+        expect(baselineResult.initialGitDiffFromHead).toContain("preexisting-untracked.txt");
+        expect(baselineResult.initialGitDiffFromHead).toContain("src/value.txt");
+        expect(baselineResult.finalGitDiffFromHead).toContain("baseline-only.txt");
+        expect(treatmentResult.finalGitDiffFromHead).toContain("treatment-only.txt");
+        expect(baselineResult).not.toHaveProperty("diff");
       } finally {
         await baseline.cleanup();
         await treatment.cleanup();
@@ -321,5 +378,30 @@ describe.sequential("strict isolated runner", () => {
     expect(await dockerObjectAbsent("container", environment.container)).toBe(true);
     expect(await dockerObjectAbsent("volume", environment.volume)).toBe(true);
     expect(await dockerObjectAbsent("volume", snapshot.volume)).toBe(true);
+  }, 180_000);
+
+  integration("cleanup en echec prouve la ressource restante puis peut etre retente", async () => {
+    const runner = createRunner();
+    const snapshot = await runner.prepare({ target: { id: "cleanup-retry", source: "git" }, targetPath: targetRoot });
+    const environment = await snapshot.createEnvironment("cleanup-retry");
+    const blocker = `${STRICT_RESOURCE_PREFIX}cleanup-blocker-${process.pid}-${Date.now()}`;
+    try {
+      await environment.start();
+      const started = await runProcess("docker", [
+        "run", "--detach", "--rm", "--name", blocker, "--network", "none",
+        "--mount", `type=volume,src=${environment.volume},dst=/blocked`,
+        "--entrypoint", "sh", STRICT_RUNNER_IMAGE, "-c", "sleep 60",
+      ], { timeoutMs: 30_000 });
+      expect(started.code).toBe(0);
+      await expect(environment.cleanup()).rejects.toThrow(/Docker cleanup did not remove owned volume/);
+      expect(await dockerObjectAbsent("volume", environment.volume)).toBe(false);
+      await runProcess("docker", ["rm", "--force", blocker], { timeoutMs: 30_000 });
+      await environment.cleanup();
+      expect(await dockerObjectAbsent("volume", environment.volume)).toBe(true);
+    } finally {
+      await runProcess("docker", ["rm", "--force", blocker], { timeoutMs: 30_000 });
+      await environment.cleanup().catch(() => undefined);
+      await snapshot.cleanup();
+    }
   }, 180_000);
 });

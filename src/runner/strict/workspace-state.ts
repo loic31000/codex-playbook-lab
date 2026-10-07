@@ -27,6 +27,18 @@ export interface SourceState {
   readonly workspace: WorkspaceState;
 }
 
+export interface WorkspaceChangeSide {
+  readonly kind: "file" | "symlink";
+  readonly sha256: string;
+}
+
+export interface WorkspaceChange {
+  readonly path: string;
+  readonly status: "added" | "modified" | "deleted" | "type_changed";
+  readonly before: WorkspaceChangeSide | null;
+  readonly after: WorkspaceChangeSide | null;
+}
+
 function sha256(value: string | Buffer): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
@@ -224,9 +236,32 @@ export function changedFilesBetween(
   initial: WorkspaceState,
   final: WorkspaceState,
 ): readonly string[] {
+  return workspaceChangesBetween(initial, final).map((change) => change.path);
+}
+
+export function workspaceChangesBetween(
+  initial: WorkspaceState,
+  final: WorkspaceState,
+): readonly WorkspaceChange[] {
   const before = new Map(initial.manifest.map((entry) => [entry.path, `${entry.kind}:${entry.sha256}`]));
   const after = new Map(final.manifest.map((entry) => [entry.path, `${entry.kind}:${entry.sha256}`]));
+  const initialEntries = new Map(initial.manifest.map((entry) => [entry.path, entry]));
+  const finalEntries = new Map(final.manifest.map((entry) => [entry.path, entry]));
   return [...new Set([...before.keys(), ...after.keys()])]
     .filter((pathname) => before.get(pathname) !== after.get(pathname))
-    .sort((left, right) => left.localeCompare(right, "en"));
+    .sort((left, right) => left.localeCompare(right, "en"))
+    .map((pathname) => {
+      const initialEntry = initialEntries.get(pathname);
+      const finalEntry = finalEntries.get(pathname);
+      const beforeSide = initialEntry ? { kind: initialEntry.kind, sha256: initialEntry.sha256 } : null;
+      const afterSide = finalEntry ? { kind: finalEntry.kind, sha256: finalEntry.sha256 } : null;
+      const status = !initialEntry
+        ? "added"
+        : !finalEntry
+          ? "deleted"
+          : initialEntry.kind !== finalEntry.kind
+            ? "type_changed"
+            : "modified";
+      return { path: pathname, status, before: beforeSide, after: afterSide };
+    });
 }

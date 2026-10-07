@@ -15,9 +15,10 @@ import {
 import {
   captureSourceState,
   captureVolumeWorkspaceState,
-  changedFilesBetween,
   sourceStatesEqual,
+  workspaceChangesBetween,
   type SourceState,
+  type WorkspaceChange,
   type WorkspaceState,
 } from "./workspace-state.js";
 
@@ -66,11 +67,13 @@ export interface StrictWorkspaceResult {
   readonly initial: WorkspaceState;
   readonly final: WorkspaceState;
   readonly changedFiles: readonly string[];
-  readonly diff: string | null;
+  readonly changes: readonly WorkspaceChange[];
+  readonly initialGitDiffFromHead: string | null;
+  readonly finalGitDiffFromHead: string | null;
 }
 
 export interface StrictRunnerOptions {
-  readonly hostCodexVersionOutput: string;
+  readonly trustedHostCodexVersionEvidence: string;
   readonly labRoot: string;
   readonly image?: string;
   readonly forbiddenHostPaths?: readonly string[];
@@ -83,11 +86,36 @@ export interface PrepareSnapshotInput {
 }
 
 function normalizePath(value: string): string {
-  return path.resolve(value).replaceAll("\\", "/").toLowerCase();
+  const normalized = path.resolve(value).replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function isWithin(candidate: string, root: string): boolean {
   return candidate === root || candidate.startsWith(`${root}/`);
+}
+
+async function assertContainedSymlinks(root: string): Promise<void> {
+  const canonicalRoot = normalizePath(await fs.realpath(root));
+  async function visit(directory: string): Promise<void> {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        let canonicalTarget: string;
+        try {
+          canonicalTarget = normalizePath(await fs.realpath(absolute));
+        } catch {
+          throw new Error(`target contains an unresolved symlink: ${entry.name}`);
+        }
+        if (!isWithin(canonicalTarget, canonicalRoot)) {
+          throw new Error(`target contains a symlink outside its canonical root: ${entry.name}`);
+        }
+      } else if (entry.isDirectory()) {
+        await visit(absolute);
+      }
+    }
+  }
+  await visit(root);
 }
 
 function safeLabel(value: string): string {
@@ -146,14 +174,33 @@ export async function buildStrictRunnerImage(options: {
   }
 }
 
-async function removeContainer(name: string): Promise<void> {
+async function dockerObjectExists(kind: "container" | "volume", name: string): Promise<boolean> {
   assertOwnedName(name);
-  await runProcess("docker", ["rm", "--force", name], { timeoutMs: 30_000 });
+  const args = kind === "container"
+    ? ["container", "ls", "--all", "--filter", `name=${name}`, "--format", "{{.Names}}"]
+    : ["volume", "ls", "--filter", `name=${name}`, "--format", "{{.Name}}"];
+  const result = await checkedProcess("docker", args, { timeoutMs: 30_000 });
+  return result.stdout.split(/\r?\n/).some((entry) => entry.trim() === name);
+}
+
+async function removeDockerObject(kind: "container" | "volume", name: string): Promise<void> {
+  assertOwnedName(name);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!(await dockerObjectExists(kind, name))) return;
+    const args = kind === "container" ? ["rm", "--force", name] : ["volume", "rm", name];
+    await runProcess("docker", args, { timeoutMs: 30_000 });
+    if (!(await dockerObjectExists(kind, name))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+  }
+  throw new Error(`Docker cleanup did not remove owned ${kind} ${name}`);
+}
+
+async function removeContainer(name: string): Promise<void> {
+  await removeDockerObject("container", name);
 }
 
 async function removeVolume(name: string): Promise<void> {
-  assertOwnedName(name);
-  await runProcess("docker", ["volume", "rm", name], { timeoutMs: 30_000 });
+  await removeDockerObject("volume", name);
 }
 
 async function chownWorkspace(volume: string, image: string, signal?: AbortSignal): Promise<void> {
@@ -355,6 +402,9 @@ export class StrictExecutionEnvironment {
       || facts.mounts[0]?.destination !== STRICT_WORKSPACE_PATH
       || facts.mounts[0]?.readWrite !== true
       || facts.secretEnvironmentNames.length !== 0
+      || facts.pidsLimit !== 256
+      || facts.memoryBytes !== 1024 ** 3
+      || facts.nanoCpus !== 2_000_000_000
     ) {
       throw new Error("strict Docker policy invariant violated");
     }
@@ -363,11 +413,14 @@ export class StrictExecutionEnvironment {
 
   async captureResult(signal?: AbortSignal): Promise<StrictWorkspaceResult> {
     const final = await captureVolumeWorkspaceState(this.volume, this.image, { signal });
+    const changes = workspaceChangesBetween(this.initialState, final);
     return {
       initial: this.initialState,
       final,
-      changedFiles: changedFilesBetween(this.initialState, final),
-      diff: final.diff,
+      changedFiles: changes.map((change) => change.path),
+      changes,
+      initialGitDiffFromHead: this.initialState.diff,
+      finalGitDiffFromHead: final.diff,
     };
   }
 
@@ -378,11 +431,17 @@ export class StrictExecutionEnvironment {
 
   async cleanup(): Promise<void> {
     if (this.#cleanupPromise) return this.#cleanupPromise;
-    this.#cleanupPromise = (async () => {
+    const attempt = (async () => {
       await this.stop();
       await removeVolume(this.volume);
     })();
-    return this.#cleanupPromise;
+    this.#cleanupPromise = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      this.#cleanupPromise = undefined;
+      throw error;
+    }
   }
 
   toJSON(): object {
@@ -473,11 +532,17 @@ export class StrictWorkspaceSnapshot {
 
   async cleanup(): Promise<void> {
     if (this.#cleanupPromise) return this.#cleanupPromise;
-    this.#cleanupPromise = (async () => {
+    const attempt = (async () => {
       await removeVolume(this.volume);
       if (!(await this.verifySourceUnchanged())) throw new Error("target source changed during strict runner lifecycle");
     })();
-    return this.#cleanupPromise;
+    this.#cleanupPromise = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      this.#cleanupPromise = undefined;
+      throw error;
+    }
   }
 
   toJSON(): object {
@@ -498,7 +563,7 @@ export class StrictRunner {
   readonly forbiddenHostPaths: readonly string[];
 
   constructor(options: StrictRunnerOptions) {
-    assertSupportedCodexVersion(options.hostCodexVersionOutput);
+    assertSupportedCodexVersion(options.trustedHostCodexVersionEvidence);
     this.image = options.image ?? STRICT_RUNNER_IMAGE;
     this.labRoot = normalizePath(options.labRoot);
     this.forbiddenHostPaths = [
@@ -513,12 +578,16 @@ export class StrictRunner {
     if (typeof input.targetPath !== "string" || input.targetPath.trim() === "") {
       throw new TypeError("targetPath must be explicitly provided");
     }
-    const sourcePath = path.resolve(input.targetPath);
+    const sourcePath = await fs.realpath(path.resolve(input.targetPath));
     const sourceNormalized = normalizePath(sourcePath);
-    if (this.forbiddenHostPaths.some((root) => isWithin(sourceNormalized, root))) {
+    const canonicalForbiddenPaths = await Promise.all(this.forbiddenHostPaths.map(async (root) => (
+      normalizePath(await fs.realpath(root))
+    )));
+    if (canonicalForbiddenPaths.some((root) => isWithin(sourceNormalized, root))) {
       throw new Error("targetPath points inside a forbidden host path");
     }
     if (!(await fs.stat(sourcePath)).isDirectory()) throw new TypeError("targetPath must reference a directory");
+    await assertContainedSymlinks(sourcePath);
 
     const initialSourceState = await captureSourceState(sourcePath);
     const volume = `${ownedName("snapshot")}-workspace`;

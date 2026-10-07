@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -22,6 +23,28 @@ const fixtureJson = readFileSync("tests/fixtures/experiment.complete.json", "utf
 
 function fixtureValue(): Record<string, unknown> {
   return JSON.parse(fixtureJson) as Record<string, unknown>;
+}
+
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function generatedProvenance(content: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const instruction = "Genere un cas limite.";
+  return {
+    generatorId: "generator",
+    generatorVersion: "1.0.0",
+    generatedAt: "2026-10-05T10:00:00.000Z",
+    instruction: { kind: "content", value: instruction },
+    instructionVersion: "instruction-v1",
+    instructionFingerprint: fingerprint(instruction),
+    model: "fake-model",
+    modelOptions: { temperature: 0 },
+    target: { id: "target", source: "git", revision: "abc123" },
+    contentFingerprint: fingerprint(content),
+    reproducibility: "not_guaranteed",
+    ...overrides,
+  };
 }
 
 describe("Experiment domain foundation", () => {
@@ -63,11 +86,7 @@ describe("Experiment domain foundation", () => {
         id: "generated",
         title: "Genere",
         input: "Tache generee",
-        provenance: {
-          generatorId: "generator",
-          generatedAt: "2026-10-05T10:00:00.000Z",
-          instruction: { kind: "reference", value: "prompts/generator-v1.md" },
-        },
+        provenance: generatedProvenance("Tache generee"),
       }),
     ];
 
@@ -89,13 +108,37 @@ describe("Experiment domain foundation", () => {
       id: "generated",
       title: "Genere",
       input: "Tache",
-      provenance: {
-        generatorId: "generator",
-        generatedAt: "2026-10-05T10:00:00.000Z",
-        seed: "stable-seed",
-        instruction: { kind: "content", value: "Genere un cas limite." },
-      },
+      provenance: generatedProvenance("Tache", { seed: "stable-seed" }),
     }).kind).toBe("generated");
+  });
+
+  it("refuse un fingerprint de contenu incorrect", () => {
+    expect(() => createTestCase({
+      kind: "generated",
+      id: "generated",
+      title: "Genere",
+      input: "Tache exacte\r\n",
+      provenance: generatedProvenance("autre contenu"),
+    })).toThrow(/contentFingerprint does not match/);
+  });
+
+  it("rend le GeneratedCase accepte par Experiment immuable", () => {
+    const experiment = parseExperimentJson(fixtureJson);
+    const generated = experiment.testCases.find(({ kind }) => kind === "generated");
+    expect(generated?.kind).toBe("generated");
+    expect(Object.isFrozen(generated)).toBe(true);
+    if (generated?.kind !== "generated") throw new Error("generated fixture missing");
+    const originalInput = generated.input;
+    const originalOptions = generated.provenance.modelOptions;
+    expect(() => {
+      (generated as { input: string }).input = "texte remplace";
+    }).toThrow(TypeError);
+    expect(() => {
+      (originalOptions as { temperature: number }).temperature = 1;
+    }).toThrow(TypeError);
+    expect(generated.input).toBe(originalInput);
+    expect(generated.provenance.contentFingerprint).toBe(fingerprint(originalInput));
+    expect(generated.provenance.modelOptions).toEqual({ temperature: 0.2, maxOutputTokens: 2048 });
   });
 
   it("valide separement les statuts techniques et humains", () => {

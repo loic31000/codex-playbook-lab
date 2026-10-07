@@ -68,12 +68,23 @@ export type GenerationInstruction =
   | { readonly kind: "fingerprint"; readonly value: string }
   | { readonly kind: "reference"; readonly value: string };
 
+export const REPRODUCIBILITY_MODES = ["not_guaranteed", "deterministic"] as const;
+
+export type Reproducibility = (typeof REPRODUCIBILITY_MODES)[number];
+
 export interface GenerationProvenance {
   readonly generatorId: string;
   readonly generatorVersion?: string;
   readonly generatedAt: string;
-  readonly seed?: string | number;
   readonly instruction: GenerationInstruction;
+  readonly instructionVersion?: string;
+  readonly instructionFingerprint: string;
+  readonly model: string;
+  readonly modelOptions: JsonObject;
+  readonly target: TargetRef;
+  readonly contentFingerprint: string;
+  readonly reproducibility: Reproducibility;
+  readonly seed?: string | number;
   readonly parentRef?: string;
 }
 
@@ -239,6 +250,22 @@ function copyJsonValue(value: unknown, path: string): JsonValue {
   );
 }
 
+function sha256Exact(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function sha256Fingerprint(value: unknown, path: string): string {
+  const fingerprint = nonEmptyString(value, path);
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new TypeError(`${path} must be a SHA-256 fingerprint`);
+  return fingerprint;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const entry of Object.values(value)) deepFreeze(entry);
+  return Object.freeze(value);
+}
+
 const FORBIDDEN_EVIDENCE_LABELS = new Set([
   "approved",
   "valide",
@@ -377,7 +404,11 @@ export function createGenerationProvenance(value: unknown): GenerationProvenance
   const input = asRecord(value, "provenance");
   assertOnlyKeys(
     input,
-    ["generatorId", "generatorVersion", "generatedAt", "seed", "instruction", "parentRef"],
+    [
+      "generatorId", "generatorVersion", "generatedAt", "instruction", "instructionVersion",
+      "instructionFingerprint", "model", "modelOptions", "target", "contentFingerprint",
+      "reproducibility", "seed", "parentRef",
+    ],
     "provenance",
   );
   if (input.seed !== undefined && typeof input.seed !== "string" && typeof input.seed !== "number") {
@@ -386,12 +417,31 @@ export function createGenerationProvenance(value: unknown): GenerationProvenance
   if (typeof input.seed === "number" && !Number.isFinite(input.seed)) {
     throw new TypeError("provenance.seed must be finite");
   }
+  const instruction = createGenerationInstruction(input.instruction);
+  const instructionFingerprint = sha256Fingerprint(input.instructionFingerprint, "provenance.instructionFingerprint");
+  if (instructionFingerprint !== sha256Exact(instruction.value)) {
+    throw new TypeError("provenance.instructionFingerprint does not match provenance.instruction.value");
+  }
+  const modelOptions = copyJsonValue(input.modelOptions, "provenance.modelOptions");
+  if (typeof modelOptions !== "object" || modelOptions === null || Array.isArray(modelOptions)) {
+    throw new TypeError("provenance.modelOptions must be a JSON object");
+  }
+  if (!REPRODUCIBILITY_MODES.includes(input.reproducibility as Reproducibility)) {
+    throw new TypeError(`unknown provenance.reproducibility: ${String(input.reproducibility)}`);
+  }
   const output: UnknownRecord = {
     generatorId: nonEmptyString(input.generatorId, "provenance.generatorId"),
     generatedAt: isoTimestamp(input.generatedAt, "provenance.generatedAt"),
-    instruction: createGenerationInstruction(input.instruction),
+    instruction,
+    instructionFingerprint,
+    model: nonEmptyString(input.model, "provenance.model"),
+    modelOptions,
+    target: createTargetRef(input.target),
+    contentFingerprint: sha256Fingerprint(input.contentFingerprint, "provenance.contentFingerprint"),
+    reproducibility: input.reproducibility,
   };
   optionalField(output, "generatorVersion", optionalString(input.generatorVersion, "provenance.generatorVersion"));
+  optionalField(output, "instructionVersion", optionalString(input.instructionVersion, "provenance.instructionVersion"));
   optionalField(output, "seed", input.seed as string | number | undefined);
   optionalField(output, "parentRef", optionalString(input.parentRef, "provenance.parentRef"));
   return output as unknown as GenerationProvenance;
@@ -410,13 +460,18 @@ export function createTestCase(value: unknown): TestCase {
   }
   if (input.kind === "generated") {
     assertOnlyKeys(input, ["kind", "id", "title", "input", "provenance"], "generatedCase");
-    return {
+    const exactInput = nonEmptyString(input.input, "generatedCase.input");
+    const generatedCase: GeneratedCase = {
       kind: "generated",
       id: nonEmptyString(input.id, "generatedCase.id"),
       title: nonEmptyString(input.title, "generatedCase.title"),
-      input: nonEmptyString(input.input, "generatedCase.input"),
+      input: exactInput,
       provenance: createGenerationProvenance(input.provenance),
     };
+    if (generatedCase.provenance.contentFingerprint !== sha256Exact(exactInput)) {
+      throw new TypeError("provenance.contentFingerprint does not match generatedCase.input");
+    }
+    return deepFreeze(generatedCase);
   }
   throw new TypeError("testCase.kind must be fixed or generated");
 }
@@ -604,3 +659,4 @@ export function parseExperimentJson(json: string): Experiment {
   }
   return createExperiment(value);
 }
+import crypto from "node:crypto";

@@ -37,6 +37,20 @@
           "kind": "fingerprint",
           "value": "sha256:generation-instruction"
         },
+        "instructionVersion": "generator-instruction-v1",
+        "instructionFingerprint": "0c068f5a345cb591a5b26e6ad675a8d64ece43dbb56a5794331aca242bf06b2a",
+        "model": "fake-generator-model",
+        "modelOptions": {
+          "temperature": 0.2,
+          "maxOutputTokens": 2048
+        },
+        "target": {
+          "id": "math-fixture",
+          "source": "git",
+          "revision": "96bbdd2cf9cd8b01f21d77759bb8b5b190f4bf44"
+        },
+        "contentFingerprint": "c9db786a227801ae427071e7f581af1ba38149fd86d71faef0ff49cb329bdac2",
+        "reproducibility": "not_guaranteed",
         "parentRef": "fixed-add"
       }
     }

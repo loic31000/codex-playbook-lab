@@ -65,7 +65,7 @@ sans contradiction.
 | Orchestration d'expériences (#27) | à venir |
 | Evidence persistée / reprise (#28) | à venir |
 | Revue humaine / promotion (#29) | implémentée sur la branche dédiée |
-| Rapport factuel (#30) | à venir |
+| Rapport factuel (#30) | implémenté sur la branche dédiée |
 | Couche applicative / CLI (#31) | à venir |
 | API / événements (#32) | à venir |
 | GUI (#33) | à venir |

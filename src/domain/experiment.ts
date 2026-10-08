@@ -169,6 +169,13 @@ export interface HumanReviewInput {
   readonly comment?: string;
 }
 
+export interface HumanReviewTransitionInput {
+  readonly status: HumanReviewStatus;
+  readonly reviewer: string;
+  readonly reviewedAt: string;
+  readonly comment?: string;
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 function asRecord(value: unknown, path: string): UnknownRecord {
@@ -581,12 +588,35 @@ export function updateRunTechnicalState(run: ExperimentRun, update: TechnicalRun
 }
 
 export function recordHumanReview(run: ExperimentRun, review: HumanReviewInput): ExperimentRun {
+  return transitionHumanReview(run, {
+    ...review,
+    status: parseHumanDecisionStatus(review.status),
+  });
+}
+
+export function transitionHumanReview(
+  run: ExperimentRun,
+  review: HumanReviewTransitionInput,
+): ExperimentRun {
+  const current = parseExperimentRun(run);
+  const status = parseHumanReviewStatus(review.status);
+  const reviewer = nonEmptyString(review.reviewer, "review.reviewer");
+  const reviewedAt = isoTimestamp(review.reviewedAt, "review.reviewedAt");
+  const comment = optionalString(review.comment, "review.comment");
+  const {
+    reviewer: _previousReviewer,
+    reviewedAt: _previousReviewedAt,
+    reviewComment: _previousComment,
+    ...technicalAndIdentity
+  } = current;
   return parseExperimentRun({
-    ...run,
-    humanReviewStatus: parseHumanDecisionStatus(review.status),
-    reviewer: review.reviewer,
-    reviewedAt: review.reviewedAt,
-    ...(review.comment === undefined ? {} : { reviewComment: review.comment }),
+    ...technicalAndIdentity,
+    humanReviewStatus: status,
+    ...(status === "pending_review" ? {} : {
+      reviewer,
+      reviewedAt,
+      ...(comment === undefined ? {} : { reviewComment: comment }),
+    }),
   });
 }
 

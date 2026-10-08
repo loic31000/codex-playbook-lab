@@ -10,6 +10,7 @@ import {
   runExperimentPlan,
   StrictExperimentExecutionBackend,
 } from "../../src/experiment/index.js";
+import { openEvidenceStore, runStoredExperimentPlan } from "../../src/evidence/index.js";
 import {
   STRICT_RESOURCE_PREFIX,
   STRICT_RUNNER_IMAGE,
@@ -368,7 +369,16 @@ describe.sequential("strict isolated runner", () => {
             "sh", "-lc", `printf '%s\\n' run-${plannedRun.ordinal} > /workspace/run-${plannedRun.ordinal}.txt`,
           ]);
           expect(mutation.code).toBe(0);
-          return { exitCode: 0 };
+          return {
+            exitCode: 0,
+            transcript: {
+              model: "fake-strict-agent",
+              modelOptions: {},
+              finalOutput: `completed run ${plannedRun.ordinal}`,
+              stdout: "",
+              stderr: "",
+            },
+          };
         },
       },
     });
@@ -404,6 +414,100 @@ describe.sequential("strict isolated runner", () => {
     });
     expect(await captureSourceState(targetRoot)).toEqual(initialSourceState);
     expect(await strictResources()).toEqual({ containers: [], volumes: [] });
+  }, 300_000);
+
+  integration("archive deux runs stricts A/B dans un store portable sans modifier la source", async () => {
+    const storeParent = await fs.mkdtemp(path.join(os.tmpdir(), "codex-evidence-docker-"));
+    const storeRoot = path.join(storeParent, "store");
+    try {
+      const target = {
+        id: "evidence-docker-target",
+        source: "git",
+        revision: initialSourceState.workspace.gitHead ?? undefined,
+      } as const;
+      const caseInput = "Exact Docker evidence case";
+      const promptContent = "Exact Docker evidence treatment";
+      const plan = createExperimentExecutionPlan({
+        id: "evidence-docker-plan",
+        experiments: [{
+          id: "evidence-docker-experiment",
+          promptDefinition: { id: "evidence-docker-prompt", name: "Docker evidence prompt" },
+          promptVersion: {
+            id: "evidence-docker-prompt@v1",
+            promptDefinitionId: "evidence-docker-prompt",
+            content: promptContent,
+          },
+          target,
+          testCases: [{ kind: "fixed", id: "evidence-docker-case", title: "Docker evidence", input: caseInput }],
+          configuration: { repetitions: 1 },
+          runs: [],
+        }],
+      });
+      const store = await openEvidenceStore(storeRoot);
+      const observedInputs: string[] = [];
+      const state = await runStoredExperimentPlan({
+        store,
+        plan,
+        backend: new StrictExperimentExecutionBackend(createRunner()),
+        targetPath: targetRoot,
+        executor: {
+          async execute({ environment, modelInput, plannedRun }) {
+            observedInputs.push(modelInput);
+            const priorMutation = await environment.exec([
+              "sh", "-lc", "find /workspace -maxdepth 1 -type f -name 'evidence-run-*.txt' -print",
+            ]);
+            expect(priorMutation.code).toBe(0);
+            expect(priorMutation.stdout.trim()).toBe("");
+            const mutation = await environment.exec([
+              "sh", "-lc", `printf '%s\\n' evidence-${plannedRun.ordinal} > /workspace/evidence-run-${plannedRun.ordinal}.txt`,
+            ]);
+            expect(mutation.code).toBe(0);
+            return {
+              exitCode: 0,
+              transcript: {
+                model: "fake-docker-evidence-agent",
+                modelOptions: { temperature: 0 },
+                finalOutput: `stored run ${plannedRun.ordinal}`,
+                stdout: `stdout run ${plannedRun.ordinal}\n`,
+                stderr: "",
+              },
+            };
+          },
+        },
+      });
+
+      expect(state.status).toBe("completed");
+      expect(state.runs).toHaveLength(2);
+      expect(new Set(state.runs.map(({ facts }) => facts?.volume)).size).toBe(2);
+      expect(observedInputs).toEqual([caseInput, `${promptContent}\n\n---\n\n${caseInput}`]);
+
+      const attempts = await Promise.all(plan.plannedRuns.map(async (plannedRun) => (
+        store.readAttempt(plan.fingerprint, plannedRun.id, 1)
+      )));
+      const manifests = attempts.map(({ manifest }) => {
+        expect(manifest).not.toBeNull();
+        return manifest!;
+      });
+      expect(new Set(manifests.map(({ fingerprints }) => fingerprints.target)).size).toBe(1);
+      expect(new Set(manifests.map(({ workspace }) => workspace!.initialWorkspaceFingerprint)).size).toBe(1);
+      expect(manifests.map(({ changedFiles }) => changedFiles)).toEqual([
+        ["evidence-run-1.txt"],
+        ["evidence-run-2.txt"],
+      ]);
+      for (const [index, manifest] of manifests.entries()) {
+        const expectedInput = index === 0 ? caseInput : `${promptContent}\n\n---\n\n${caseInput}`;
+        expect((await store.readArtifact(manifest.artifacts.modelInput)).toString("utf8")).toBe(expectedInput);
+        const initialDiff = (await store.readArtifact(manifest.artifacts.initialGitDiffFromHead!)).toString("utf8");
+        const finalDiff = (await store.readArtifact(manifest.artifacts.finalGitDiffFromHead!)).toString("utf8");
+        expect(finalDiff).toContain(`diff --git a/evidence-run-${index + 1}.txt b/evidence-run-${index + 1}.txt`);
+        expect(`${initialDiff}\n${finalDiff}`).not.toContain(targetRoot);
+        expect(`${initialDiff}\n${finalDiff}`).not.toContain(storeRoot);
+      }
+      expect(await captureSourceState(targetRoot)).toEqual(initialSourceState);
+      expect(await strictResources()).toEqual({ containers: [], volumes: [] });
+    } finally {
+      await fs.rm(storeParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   }, 300_000);
 
   integration("nettoie container, volume et snapshot apres succes", async () => {

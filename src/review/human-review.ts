@@ -52,6 +52,21 @@ function runDirectoryName(plannedRunId: string): string {
   return Buffer.from(plannedRunId, "utf8").toString("base64url");
 }
 
+export function humanReviewRecordRef(
+  planFingerprint: string,
+  plannedRunId: string,
+  sequence: number,
+): string {
+  if (!SHA256.test(planFingerprint)) throw new TypeError("planFingerprint must be SHA-256");
+  if (typeof plannedRunId !== "string" || plannedRunId.length === 0) {
+    throw new TypeError("plannedRunId must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(sequence) || sequence < 1) {
+    throw new TypeError("review sequence must be a positive integer");
+  }
+  return `plans/${planFingerprint}/reviews/${runDirectoryName(plannedRunId)}/${String(sequence).padStart(8, "0")}.json`;
+}
+
 function reviewDirectory(store: FilesystemEvidenceStore, planFingerprint: string, plannedRunId: string): string {
   return path.join(store.root, "plans", planFingerprint, "reviews", runDirectoryName(plannedRunId));
 }
@@ -295,7 +310,11 @@ export async function recordHumanReview(
   };
   input.store.assertPortable(record);
   const directory = reviewDirectory(input.store, input.planFingerprint, input.plannedRunId);
-  const filename = `${String(record.sequence).padStart(8, "0")}.json`;
+  const filename = path.posix.basename(humanReviewRecordRef(
+    input.planFingerprint,
+    input.plannedRunId,
+    record.sequence,
+  ));
   await writeOnceCanonicalJson(path.join(directory, filename), record, `human review ${record.sequence}`);
   return record;
 }

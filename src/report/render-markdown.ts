@@ -106,7 +106,8 @@ export function renderExperimentReportMarkdown(report: ExperimentReport): string
     ...report.comparisons.flatMap((entry) => [
       `### ${escapeMarkdown(entry.experimentId)} / ${escapeMarkdown(entry.testCaseId)} / répétition ${entry.repetition}`,
       "",
-      `- Comparaison factuellement complète : ${entry.comparisonComplete ? "oui" : "non"}`,
+      `- Paire terminale : ${entry.pairTerminal ? "oui" : "non"}`,
+      `- Faits comparatifs complets : ${entry.factsComplete ? "oui" : "non"}`,
       `- Faits manquants : ${list(entry.missingFacts)}`,
       `- BASELINE : ${escapeMarkdown(entry.baseline.plannedRunId)}, statut ${escapeMarkdown(entry.baseline.technicalStatus)}, exit code ${shown(entry.baseline.exitCode)}, durée ${shown(entry.baseline.durationMs)} ms`,
       `- AVEC PROMPT : ${escapeMarkdown(entry.treatment.plannedRunId)}, statut ${escapeMarkdown(entry.treatment.technicalStatus)}, exit code ${shown(entry.treatment.exitCode)}, durée ${shown(entry.treatment.durationMs)} ms`,

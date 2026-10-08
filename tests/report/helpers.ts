@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { createEvidence } from "../../src/domain/index.js";
 import {
+  LocalRunExecutionError,
   canonicalJson,
   createExperimentExecutionPlan,
   sha256Exact,
@@ -61,7 +62,10 @@ const changedFiles = [
 ] as const;
 
 class ReportBackend implements ExperimentExecutionBackend {
-  constructor(private readonly crashOnOrdinal: number | null = null) {}
+  constructor(private readonly options: {
+    readonly crashOnOrdinal?: number;
+    readonly localErrorOnOrdinal?: number;
+  } = {}) {}
 
   async open(input: Parameters<ExperimentExecutionBackend["open"]>[0]): Promise<ExperimentExecutionSession> {
     const value = baseline();
@@ -71,7 +75,12 @@ class ReportBackend implements ExperimentExecutionBackend {
     return {
       baseline: value,
       executeRun: async (request: BackendRunRequest) => {
-        if (request.plannedRun.ordinal === this.crashOnOrdinal) throw new Error("simulated report process crash");
+        if (request.plannedRun.ordinal === this.options.crashOnOrdinal) {
+          throw new Error("simulated report process crash");
+        }
+        if (request.plannedRun.ordinal === this.options.localErrorOnOrdinal) {
+          throw new LocalRunExecutionError(new Error("simulated report local execution error"));
+        }
         const execution = await request.executor.execute({
           plannedRun: request.plannedRun,
           experiment: request.experiment,
@@ -223,7 +232,7 @@ export async function createCrashedReportFixture(id = "crashed-report-plan"): Pr
   await runStoredExperimentPlan({
     store: fixture.store,
     plan: fixture.plan,
-    backend: new ReportBackend(2),
+    backend: new ReportBackend({ crashOnOrdinal: 2 }),
     targetPath: fixture.targetPath,
     now: () => new Date(Date.UTC(2026, 9, 9, 11, 0, tick++)),
     executor: {
@@ -319,6 +328,65 @@ export async function createManifestAheadFixture(id = "ahead-report-plan"): Prom
       if (!(error instanceof Error) || !/simulated crash after report manifest/.test(error.message)) throw error;
     },
   );
+  return fixture;
+}
+
+export async function resumeReportFixture(fixture: ReportFixture): Promise<ReportFixture> {
+  const reopened = await openEvidenceStore(fixture.storeRoot);
+  let tick = 0;
+  await runStoredExperimentPlan({
+    store: reopened,
+    plan: fixture.plan,
+    backend: new ReportBackend(),
+    targetPath: fixture.targetPath,
+    resume: true,
+    now: () => new Date(Date.UTC(2026, 9, 9, 14, 0, tick++)),
+    executor: {
+      async execute({ plannedRun }) {
+        return {
+          exitCode: 0,
+          evidence: [],
+          transcript: {
+            model: "report-agent",
+            modelOptions: {},
+            finalOutput: `resumed-${plannedRun.ordinal}`,
+            stdout: "",
+            stderr: "",
+          },
+        };
+      },
+    },
+  });
+  return { ...fixture, store: reopened };
+}
+
+export async function createExecutionErrorReportFixture(
+  id = "execution-error-report-plan",
+): Promise<ReportFixture> {
+  const fixture = await createEmptyReportFixture(id);
+  let tick = 0;
+  await runStoredExperimentPlan({
+    store: fixture.store,
+    plan: fixture.plan,
+    backend: new ReportBackend({ localErrorOnOrdinal: 1 }),
+    targetPath: fixture.targetPath,
+    now: () => new Date(Date.UTC(2026, 9, 9, 15, 0, tick++)),
+    executor: {
+      async execute({ plannedRun }) {
+        return {
+          exitCode: 0,
+          evidence: [],
+          transcript: {
+            model: "report-agent",
+            modelOptions: {},
+            finalOutput: `execution-error-pair-${plannedRun.ordinal}`,
+            stdout: "",
+            stderr: "",
+          },
+        };
+      },
+    },
+  });
   return fixture;
 }
 

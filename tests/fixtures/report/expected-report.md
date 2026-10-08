@@ -88,7 +88,8 @@ Actions humaines enregistrées : 3.
 
 ### report\-experiment / case\-alpha / répétition 1
 
-- Comparaison factuellement complète : oui
+- Paire terminale : oui
+- Faits comparatifs complets : oui
 - Faits manquants : aucun
 - BASELINE : complete\-report\-plan\-0001\-3c8681e17043, statut completed, exit code 0, durée 100 ms
 - AVEC PROMPT : complete\-report\-plan\-0002\-65b20117992f, statut failed, exit code 2, durée 150 ms
@@ -99,7 +100,8 @@ Actions humaines enregistrées : 3.
 
 ### report\-experiment / case\-beta / répétition 1
 
-- Comparaison factuellement complète : oui
+- Paire terminale : oui
+- Faits comparatifs complets : oui
 - Faits manquants : aucun
 - BASELINE : complete\-report\-plan\-0003\-faa39f732202, statut completed, exit code 0, durée 90 ms
 - AVEC PROMPT : complete\-report\-plan\-0004\-2be0ce3b4a93, statut completed, exit code 0, durée 110 ms

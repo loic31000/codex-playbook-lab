@@ -14,9 +14,11 @@ import {
   createCompleteReportFixture,
   createCrashedReportFixture,
   createEmptyReportFixture,
+  createExecutionErrorReportFixture,
   createInterruptedReportFixture,
   createManifestAheadFixture,
   removeReportFixture,
+  resumeReportFixture,
   snapshotTree,
   type ReportFixture,
 } from "./helpers.js";
@@ -118,7 +120,8 @@ describe("factual human report", () => {
     expect(report.comparisons).toHaveLength(2);
     expect(report.comparisons[0]).toMatchObject({
       testCaseId: "case-alpha",
-      comparisonComplete: true,
+      pairTerminal: true,
+      factsComplete: true,
       treatmentMinusBaselineMs: 50,
       baseline: { technicalStatus: "completed", exitCode: 0, durationMs: 100 },
       treatment: { technicalStatus: "failed", exitCode: 2, durationMs: 150 },
@@ -221,7 +224,8 @@ describe("factual human report", () => {
     expect(report.runs[1]).not.toHaveProperty("exitCode");
     expect(report.runs[1]).not.toHaveProperty("durationMs");
     expect(report.runs[1]).not.toHaveProperty("changedFiles");
-    expect(report.comparisons[0]?.comparisonComplete).toBe(false);
+    expect(report.comparisons[0]?.pairTerminal).toBe(false);
+    expect(report.comparisons[0]?.factsComplete).toBe(false);
     expect(report.comparisons[0]?.missingFacts).toContain("treatment.manifest");
   });
 
@@ -241,6 +245,66 @@ describe("factual human report", () => {
     expect(report.runs[1]).not.toHaveProperty("exitCode");
     expect(report.runs[1]).not.toHaveProperty("durationMs");
     expect(report.runs[1]?.humanReview).toMatchObject({ status: "pending_review", origin: "default_pending" });
+  });
+
+  it("reste complet apres crash, reouverture et reprise tout en conservant l'attempt partielle historique", async () => {
+    const crashed = await createCrashedReportFixture("resumed-crash-report-plan");
+    fixtures.push(crashed);
+    const resumed = await resumeReportFixture(crashed);
+    const latest = await resumed.store.readLatestCheckpoint(resumed.plan.fingerprint);
+    const report = await buildExperimentReport({ store: resumed.store, planFingerprint: resumed.plan.fingerprint });
+    const resumedRun = report.runs[1]!;
+
+    expect(latest.checkpoint?.state.status).toBe("completed");
+    expect(latest.checkpoint?.state.runs.every(({ run }) => (
+      run.technicalStatus === "completed" || run.technicalStatus === "failed"
+    ))).toBe(true);
+    expect(resumedRun.attempt).toBe(2);
+    expect(resumedRun.attempts.map(({ attempt, status }) => ({ attempt, status }))).toEqual([
+      { attempt: 1, status: "partial" },
+      { attempt: 2, status: "finalized" },
+    ]);
+    expect(report.completeness).toEqual({ complete: true, reasons: [] });
+  });
+
+  it("reste complet apres reprise d'un run cancelled avec son historique partial", async () => {
+    const interrupted = await createInterruptedReportFixture("resumed-interrupted-report-plan");
+    fixtures.push(interrupted);
+    const resumed = await resumeReportFixture(interrupted);
+    const report = await buildExperimentReport({ store: resumed.store, planFingerprint: resumed.plan.fingerprint });
+
+    expect(report.source.checkpoint?.executionStatus).toBe("completed");
+    expect(report.runs[1]?.attempts.map(({ attempt, status }) => ({ attempt, status }))).toEqual([
+      { attempt: 1, status: "partial" },
+      { attempt: 2, status: "finalized" },
+    ]);
+    expect(report.completeness).toEqual({ complete: true, reasons: [] });
+  });
+
+  it("distingue paire terminale et faits incomplets pour execution_error", async () => {
+    const fixture = await createExecutionErrorReportFixture();
+    fixtures.push(fixture);
+    const report = await buildExperimentReport({ store: fixture.store, planFingerprint: fixture.plan.fingerprint });
+    const baseline = report.runs[0]!;
+    const pair = report.comparisons[0]!;
+    const markdown = renderExperimentReportMarkdown(report);
+
+    expect(baseline.technicalStatus).toBe("failed");
+    expect(baseline.manifest?.termination.kind).toBe("execution_error");
+    expect(baseline).not.toHaveProperty("exitCode");
+    expect(baseline).not.toHaveProperty("durationMs");
+    expect(baseline).not.toHaveProperty("changedFiles");
+    expect(baseline.manifest?.workspaceKnown).toBe(false);
+    expect(baseline.manifest?.artifacts.finalOutput).toBeNull();
+    expect(baseline.manifest?.artifacts.finalGitDiffFromHead).toBeNull();
+    expect(pair.pairTerminal).toBe(true);
+    expect(pair.factsComplete).toBe(false);
+    expect(pair.missingFacts).toEqual(expect.arrayContaining([
+      "baseline.exitCode", "baseline.durationMs", "baseline.changedFiles", "baseline.finalOutput",
+    ]));
+    expect(markdown).toContain("- Paire terminale : oui");
+    expect(markdown).toContain("- Faits comparatifs complets : non");
+    expect(markdown).not.toContain("Comparaison factuellement complète : oui");
   });
 
   it("signale un manifest finalise en avance sans reconciler ni ecrire", async () => {

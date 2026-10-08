@@ -156,7 +156,8 @@ export interface ExperimentReportComparison {
   readonly experimentId: string;
   readonly testCaseId: string;
   readonly repetition: number;
-  readonly comparisonComplete: boolean;
+  readonly pairTerminal: boolean;
+  readonly factsComplete: boolean;
   readonly missingFacts: readonly string[];
   readonly baseline: {
     readonly plannedRunId: string;

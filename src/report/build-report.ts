@@ -103,11 +103,15 @@ function comparison(baseline: ExperimentReportRun, treatment: ExperimentReportRu
   const treatmentFiles = new Set(treatment.changedFiles ?? []);
   const bothManifests = baseline.manifest !== null && treatment.manifest !== null;
   const bothOutputs = baseline.manifest?.artifacts.finalOutput && treatment.manifest?.artifacts.finalOutput;
+  const pairTerminal = bothManifests
+    && TERMINAL.has(baseline.technicalStatus)
+    && TERMINAL.has(treatment.technicalStatus);
   return {
     experimentId: baseline.experimentId,
     testCaseId: baseline.testCase.id,
     repetition: baseline.repetition,
-    comparisonComplete: bothManifests && TERMINAL.has(baseline.technicalStatus) && TERMINAL.has(treatment.technicalStatus),
+    pairTerminal,
+    factsComplete: pairTerminal && missingFacts.length === 0,
     missingFacts,
     baseline: endpoint(baseline),
     treatment: endpoint(treatment),
@@ -201,7 +205,11 @@ function completenessReasons(input: {
   if (input.executionStatus === "running") reasons.push("execution_running");
   if (input.executionStatus === "interrupted") reasons.push("execution_interrupted");
   if (input.runs.some(({ technicalStatus }) => !TERMINAL.has(technicalStatus))) reasons.push("non_terminal_runs");
-  if (input.runs.some(({ attempts }) => attempts.some(({ status }) => status === "partial"))) reasons.push("partial_attempts");
+  if (input.runs.some((run) => (
+    !TERMINAL.has(run.technicalStatus)
+    && run.attempt > 0
+    && run.attempts.some(({ attempt, status }) => attempt === run.attempt && status === "partial")
+  ))) reasons.push("partial_attempts");
   if (input.runs.some((run) => (
     !TERMINAL.has(run.technicalStatus)
     && run.attempt > 0

@@ -17,7 +17,14 @@ import type { ExperimentExecutionPlan, PlannedRun } from "../experiment/plan.js"
 export const EVIDENCE_STORE_FORMAT = "codex-playbook-lab-evidence";
 export const EVIDENCE_STORE_VERSION = 1;
 
-export type EvidenceRecordKind = "store" | "plan" | "checkpoint" | "attempt-started" | "attempt-manifest";
+export type EvidenceRecordKind =
+  | "store"
+  | "plan"
+  | "checkpoint"
+  | "attempt-started"
+  | "attempt-manifest"
+  | "human-review"
+  | "case-promotion";
 
 export interface EvidenceRecordHeader {
   readonly format: typeof EVIDENCE_STORE_FORMAT;

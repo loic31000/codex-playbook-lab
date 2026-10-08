@@ -64,7 +64,7 @@ sans contradiction.
 | Cas exploratoires générés (#26) | à venir |
 | Orchestration d'expériences (#27) | à venir |
 | Evidence persistée / reprise (#28) | à venir |
-| Revue humaine / promotion (#29) | à venir |
+| Revue humaine / promotion (#29) | implémentée sur la branche dédiée |
 | Rapport factuel (#30) | à venir |
 | Couche applicative / CLI (#31) | à venir |
 | API / événements (#32) | à venir |
@@ -150,7 +150,7 @@ Un target doit être fourni explicitement par l'appelant. Le futur strict runner
 
 Les deux variantes partagent un contrat `TestCase`.
 
-Un `GeneratedCase` conserve obligatoirement sa provenance. La promotion d'un cas généré en benchmark fixe est une décision humaine et sera traitée dans une étape dédiée.
+Un `GeneratedCase` conserve obligatoirement sa provenance. Sa promotion en benchmark fixe est une action humaine explicite, distincte de la revue du run, et conserve le texte exact ainsi qu'une metadata de provenance versionnée.
 
 ### Evidence factuelle
 

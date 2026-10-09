@@ -7,6 +7,13 @@ import type { ExploratoryCaseGenerator } from "../explore/index.js";
 import type { FilesystemEvidenceStore } from "../evidence/index.js";
 import type { ApplicationEventSink } from "./events.js";
 import type { DiagnosticsPort } from "./diagnostics.js";
+import type { DiscoveredPrompt, FixedBenchmarkDefinition } from "../fixed/index.js";
+
+export type PromptDiscoveryPort = (root: string) => Promise<readonly DiscoveredPrompt[]>;
+export type BenchmarkDiscoveryPort = (
+  root: string,
+  prompts: readonly DiscoveredPrompt[],
+) => Promise<readonly FixedBenchmarkDefinition[]>;
 
 export interface ExecutionBackendFactoryInput {
   readonly plan: ExperimentExecutionPlan;
@@ -23,6 +30,8 @@ export interface ApplicationDependencies {
   readonly agentExecutor?: ExperimentAgentExecutor;
   readonly exploratoryGenerator?: ExploratoryCaseGenerator;
   readonly diagnostics?: DiagnosticsPort;
+  readonly promptDiscovery?: PromptDiscoveryPort;
+  readonly benchmarkDiscovery?: BenchmarkDiscoveryPort;
   readonly now?: () => Date;
   readonly createOperationId?: () => string;
   readonly onEvent?: ApplicationEventSink;

@@ -1,7 +1,16 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+
 import { describe, expect, it } from "vitest";
 
 import { ApplicationError, type LabApplication } from "../../src/application/index.js";
 import { main, CLI_EXIT_CODES, type CliDependencies, type CliWriter } from "../../src/cli/index.js";
+import { runCliBootstrap } from "../../src/cli/bootstrap.js";
+
+const execFileAsync = promisify(execFile);
 
 class BufferWriter implements CliWriter {
   value = "";
@@ -127,5 +136,57 @@ describe("CLI V2 adapter", () => {
       "CAPABILITY_UNAVAILABLE", "CAPABILITY_UNAVAILABLE",
     ]);
     expect(h.legacyCalls).toEqual([]);
+  });
+
+  it("rend les erreurs run invalides/absentes et refuse artifact --text --json", async () => {
+    const invalid = harness({ startExperiment() { throw new ApplicationError("INVALID_ARGUMENT", "invalid fingerprint"); } });
+    expect(await main(["experiment", "run", "--plan", "abc", "--target", "target", "--json"], invalid.dependencies)).toBe(2);
+    const missing = harness({ startExperiment() { throw new ApplicationError("NOT_FOUND", "missing plan"); } });
+    expect(await main(["experiment", "run", "--plan", "a".repeat(64), "--target", "target", "--json"], missing.dependencies)).toBe(3);
+    const artifact = harness({ async readArtifact() { throw new Error("must not be called"); } });
+    expect(await main(["artifact", "show", "--ref", `blobs/sha256/${"a".repeat(64)}`, "--text", "--json"], artifact.dependencies)).toBe(2);
+    expect(JSON.parse(artifact.stderr.value).error.code).toBe("INVALID_ARGUMENT");
+    expect(artifact.stdout.value).toBe("");
+  });
+
+  it("rend une erreur bootstrap EACCES en JSON infrastructure", async () => {
+    const stdout = new BufferWriter();
+    const stderr = new BufferWriter();
+    const code = await runCliBootstrap(["diagnostics", "--json"], {
+      stdout,
+      stderr,
+      loadRuntime: async () => ({
+        applicationMain: async () => 0,
+        createApplication: () => ({} as LabApplication),
+      }),
+      loadDefaults: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    });
+    expect(code).toBe(5);
+    expect(stdout.value).toBe("");
+    expect(stderr.value.trim().split("\n")).toHaveLength(1);
+    expect(JSON.parse(stderr.value)).toEqual({
+      error: {
+        code: "INFRASTRUCTURE_FAILURE",
+        category: "infrastructure",
+        message: "CLI configuration or runtime is unavailable",
+      },
+    });
+  });
+
+  it("fait passer la config JSON invalide du vrai shim par le renderer type", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-cli-bootstrap-"));
+    const configPath = path.join(root, "invalid.json");
+    await fs.writeFile(configPath, "{ invalid", "utf8");
+    try {
+      await expect(execFileAsync(process.execPath, [
+        path.resolve("src/cli.mjs"), "diagnostics", "--json", "--config", configPath,
+      ], { cwd: path.resolve(".") })).rejects.toMatchObject({
+        code: 2,
+        stdout: "",
+        stderr: expect.stringMatching(/^\{"error":\{"code":"INVALID_ARGUMENT","category":"usage","message":"CLI configuration is invalid"\}\}\r?\n$/),
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });

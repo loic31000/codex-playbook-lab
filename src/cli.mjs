@@ -61,11 +61,19 @@ export async function legacyMain(argv = process.argv.slice(2)) {
   throw new Error(`Commande inconnue : ${command ?? '(vide)'}`);
 }
 
+let bootstrapModule;
 let applicationModules;
+
+async function loadBootstrapModule() {
+  if (!bootstrapModule) {
+    await import('tsx/esm');
+    bootstrapModule = import('./cli/bootstrap.ts');
+  }
+  return bootstrapModule;
+}
 
 async function loadApplicationModules() {
   if (!applicationModules) {
-    await import('tsx/esm');
     applicationModules = Promise.all([
       import('./cli/index.ts'),
       import('./cli/production.ts'),
@@ -75,19 +83,22 @@ async function loadApplicationModules() {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const [{ main: applicationMain }, { createProductionLabApplication }] = await loadApplicationModules();
-  const parsed = parse(argv);
-  const config = await loadConfig({ configPath: parsed.options.configPath });
-  const application = createProductionLabApplication();
-  return applicationMain(argv, {
-    application,
+  const { runCliBootstrap } = await loadBootstrapModule();
+  return runCliBootstrap(argv, {
     stdout: process.stdout,
     stderr: process.stderr,
-    defaults: {
-      repoDir: config.repoDir,
-      playbookDir: config.playbookDir,
-      evidenceStoreDir: config.resultsDir,
-      ...(config.benchmarksDir === null ? {} : { benchmarksDir: config.benchmarksDir }),
+    async loadRuntime() {
+      const [{ main: applicationMain }, { createProductionLabApplication }] = await loadApplicationModules();
+      return { applicationMain, createApplication: createProductionLabApplication };
+    },
+    async loadDefaults(configPath) {
+      const config = await loadConfig({ configPath });
+      return {
+        repoDir: config.repoDir,
+        playbookDir: config.playbookDir,
+        evidenceStoreDir: config.resultsDir,
+        ...(config.benchmarksDir === null ? {} : { benchmarksDir: config.benchmarksDir }),
+      };
     },
     signals: {
       onSigint(handler) {

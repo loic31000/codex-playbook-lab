@@ -17,6 +17,11 @@ import { canonicalJson, sha256Canonical, sha256Exact } from "../experiment/canon
 import { findPlannedRunContext, type ExperimentExecutionPlan, type PlannedRun } from "../experiment/plan.js";
 import { humanReviewRecordFingerprint, readCurrentHumanReview } from "./human-review.js";
 import {
+  PromotionConflictError,
+  PromotionIntegrityError,
+  ReviewNotFoundError,
+} from "./errors.js";
+import {
   PROMOTED_BENCHMARK_FORMAT,
   PROMOTION_METADATA_FORMAT,
   PROMOTION_METADATA_VERSION,
@@ -141,28 +146,41 @@ async function assertFixedCaseIdAvailable(root: string, fixedCaseId: string): Pr
       (fields.format === "codex-lab-benchmark" || fields.format === PROMOTED_BENCHMARK_FORMAT)
       && fields.id === fixedCaseId
     ) {
-      throw new Error(`fixed benchmark id already exists: ${fixedCaseId}`);
+      throw new PromotionConflictError(`fixed benchmark id already exists: ${fixedCaseId}`);
     }
   }
 }
 
 async function resolvePromotionSource(input: PromoteGeneratedCaseInput): Promise<PromotionSource> {
-  const plan = await input.store.readPlan(input.planFingerprint);
+  let plan: ExperimentExecutionPlan;
+  try {
+    plan = await input.store.readPlan(input.planFingerprint);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ReviewNotFoundError("promotion plan was not found");
+    }
+    throw error;
+  }
   const plannedRun = plan.plannedRuns.find(({ id }) => id === input.plannedRunId);
-  if (!plannedRun) throw new Error(`unknown PlannedRun ${input.plannedRunId}`);
+  if (!plannedRun) throw new ReviewNotFoundError(`unknown PlannedRun ${input.plannedRunId}`);
   const { testCase } = findPlannedRunContext(plan, plannedRun);
-  if (testCase.kind !== "generated") throw new Error("only a GeneratedCase can be promoted");
+  if (testCase.kind !== "generated") throw new PromotionConflictError("only a GeneratedCase can be promoted");
   const latest = await input.store.readLatestCheckpoint(plan.fingerprint);
   const logicalRun = latest.checkpoint?.state.runs.find(({ plannedRunId }) => plannedRunId === plannedRun.id);
   if (!logicalRun || (logicalRun.run.technicalStatus !== "completed" && logicalRun.run.technicalStatus !== "failed")) {
-    throw new Error("promotion requires a terminal completed or failed run");
+    throw new PromotionConflictError("promotion requires a terminal completed or failed run");
   }
-  const attempt = await input.store.readAttempt(plan.fingerprint, plannedRun.id, logicalRun.attempt);
+  let attempt: Awaited<ReturnType<FilesystemEvidenceStore["readAttempt"]>>;
+  try {
+    attempt = await input.store.readAttempt(plan.fingerprint, plannedRun.id, logicalRun.attempt);
+  } catch (error) {
+    throw new PromotionIntegrityError("promotion attempt source is unavailable", { cause: error });
+  }
   if (!attempt.manifest || !attempt.summary.manifestRef || attempt.summary.status !== "finalized") {
-    throw new Error("promotion requires a finalized attempt manifest");
+    throw new PromotionConflictError("promotion requires a finalized attempt manifest");
   }
   if (canonicalJson(attempt.manifest.experimentRun) !== canonicalJson(logicalRun.run)) {
-    throw new Error("promotion attempt differs from the current logical run");
+    throw new PromotionIntegrityError("promotion attempt differs from the current logical run");
   }
   const currentReview = await readCurrentHumanReview({
     store: input.store,
@@ -170,7 +188,7 @@ async function resolvePromotionSource(input: PromoteGeneratedCaseInput): Promise
     plannedRunId: plannedRun.id,
   });
   if (currentReview.status === "pending_review" || !currentReview.latest) {
-    throw new Error("promotion requires an explicit non-pending human review");
+    throw new PromotionConflictError("promotion requires an explicit non-pending human review");
   }
   const review = currentReview.latest;
   if (
@@ -178,7 +196,7 @@ async function resolvePromotionSource(input: PromoteGeneratedCaseInput): Promise
     || review.sourceAttemptRef !== attempt.summary.manifestRef
     || review.sourceAttemptFingerprint !== sha256Canonical(attempt.manifest)
   ) {
-    throw new Error("promotion review does not reference the current finalized attempt");
+    throw new PromotionIntegrityError("promotion review does not reference the current finalized attempt");
   }
   return {
     plan,
@@ -316,10 +334,16 @@ export async function promoteGeneratedCase(
 
   const source = await resolvePromotionSource(input);
   if (!SAFE_ID.test(source.manifest.promptVersion.promptDefinitionId)) {
-    throw new Error("source promptDefinitionId is invalid for a benchmark path");
+    throw new PromotionIntegrityError("source promptDefinitionId is invalid for a benchmark path");
   }
-  if (await readCasePromotion(input.store, source.generatedCase.provenance.contentFingerprint)) {
-    throw new Error("GeneratedCase already promoted");
+  let existingPromotion: CasePromotionAuditRecord | null;
+  try {
+    existingPromotion = await readCasePromotion(input.store, source.generatedCase.provenance.contentFingerprint);
+  } catch (error) {
+    throw new PromotionIntegrityError("case promotion audit is corrupt", { cause: error });
+  }
+  if (existingPromotion) {
+    throw new PromotionConflictError("GeneratedCase already promoted");
   }
   const destinationDirectory = path.join(root, source.manifest.promptVersion.promptDefinitionId);
   const benchmarkPath = path.join(destinationDirectory, `${input.fixedCaseId}.md`);
@@ -327,12 +351,12 @@ export async function promoteGeneratedCase(
   const benchmarkRelativePath = path.relative(root, benchmarkPath).replaceAll("\\", "/");
   const metadataRelativePath = path.relative(root, metadataPath).replaceAll("\\", "/");
   if (path.isAbsolute(benchmarkRelativePath) || benchmarkRelativePath.startsWith("../")) {
-    throw new Error("benchmark destination escapes benchmarksDir");
+    throw new PromotionIntegrityError("benchmark destination escapes benchmarksDir");
   }
   const benchmarkExists = await exists(benchmarkPath);
   const metadataExists = await exists(metadataPath);
-  if (benchmarkExists !== metadataExists) throw new Error("partial promotion destination already exists");
-  if (benchmarkExists || metadataExists) throw new Error("benchmark destination already exists");
+  if (benchmarkExists !== metadataExists) throw new PromotionConflictError("partial promotion destination already exists");
+  if (benchmarkExists || metadataExists) throw new PromotionConflictError("benchmark destination already exists");
   await assertFixedCaseIdAvailable(root, input.fixedCaseId);
 
   const metadata: FixedBenchmarkPromotionMetadata = {
@@ -366,10 +390,10 @@ export async function promoteGeneratedCase(
   ].join("\n");
   const markdown = header + source.generatedCase.input;
   if (markdown.slice(header.length) !== source.generatedCase.input) {
-    throw new Error("promoted benchmark body construction changed the GeneratedCase input");
+    throw new PromotionIntegrityError("promoted benchmark body construction changed the GeneratedCase input");
   }
   if (sha256Exact(source.generatedCase.input) !== source.generatedCase.provenance.contentFingerprint) {
-    throw new Error("GeneratedCase input differs from its provenance fingerprint");
+    throw new PromotionIntegrityError("GeneratedCase input differs from its provenance fingerprint");
   }
   const auditContent = {
     format: EVIDENCE_STORE_FORMAT as typeof EVIDENCE_STORE_FORMAT,

@@ -17,6 +17,7 @@ import {
 import type { FilesystemEvidenceStore } from "../evidence/filesystem-evidence-store.js";
 import { canonicalJson, sha256Canonical } from "../experiment/canonical-json.js";
 import type { ExperimentExecutionPlan, PlannedRun } from "../experiment/plan.js";
+import { ReviewConflictError, ReviewIntegrityError, ReviewNotFoundError } from "./errors.js";
 import type { HumanReviewAuditRecord, CurrentHumanReview } from "./schema.js";
 
 const REVIEW_FILE = /^(\d{8,})\.json$/;
@@ -108,24 +109,29 @@ function exactKeys(record: Record<string, unknown>, allowed: readonly string[], 
 async function resolveReviewSource(input: ReadHumanReviewInput): Promise<ReviewSource> {
   const plan = await input.store.readPlan(input.planFingerprint);
   const plannedRun = plan.plannedRuns.find(({ id }) => id === input.plannedRunId);
-  if (!plannedRun) throw new Error(`unknown PlannedRun ${input.plannedRunId}`);
+  if (!plannedRun) throw new ReviewNotFoundError(`unknown PlannedRun ${input.plannedRunId}`);
   const latest = await input.store.readLatestCheckpoint(plan.fingerprint);
-  if (!latest.checkpoint) throw new Error("human review requires a durable experiment checkpoint");
+  if (!latest.checkpoint) throw new ReviewConflictError("human review requires a durable experiment checkpoint");
   const logicalRun = latest.checkpoint.state.runs.find(({ plannedRunId }) => plannedRunId === plannedRun.id);
-  if (!logicalRun) throw new Error(`checkpoint has no logical run ${plannedRun.id}`);
+  if (!logicalRun) throw new ReviewIntegrityError(`checkpoint has no logical run ${plannedRun.id}`);
   if (logicalRun.run.technicalStatus !== "completed" && logicalRun.run.technicalStatus !== "failed") {
-    throw new Error("human review requires a terminal completed or failed run");
+    throw new ReviewConflictError("human review requires a terminal completed or failed run");
   }
-  const attempt = await input.store.readAttempt(plan.fingerprint, plannedRun.id, logicalRun.attempt);
+  let attempt: Awaited<ReturnType<FilesystemEvidenceStore["readAttempt"]>>;
+  try {
+    attempt = await input.store.readAttempt(plan.fingerprint, plannedRun.id, logicalRun.attempt);
+  } catch (error) {
+    throw new ReviewIntegrityError("human review attempt source is unavailable", { cause: error });
+  }
   if (attempt.summary.status !== "finalized" || !attempt.manifest || !attempt.summary.manifestRef) {
-    throw new Error("human review requires a finalized attempt manifest");
+    throw new ReviewConflictError("human review requires a finalized attempt manifest");
   }
   if (
     attempt.manifest.plannedRunId !== plannedRun.id
     || attempt.manifest.attempt !== logicalRun.attempt
     || canonicalJson(attempt.manifest.experimentRun) !== canonicalJson(logicalRun.run)
   ) {
-    throw new Error("finalized attempt differs from the current logical run");
+    throw new ReviewIntegrityError("finalized attempt differs from the current logical run");
   }
   return {
     plan,
@@ -229,9 +235,9 @@ export async function readHumanReviewHistory(
   for (const entry of entries) {
     if (entry.name.startsWith(".tmp-")) continue;
     const match = REVIEW_FILE.exec(entry.name);
-    if (!entry.isFile() || !match) throw new Error(`invalid human review journal entry: ${entry.name}`);
+    if (!entry.isFile() || !match) throw new ReviewIntegrityError(`invalid human review journal entry: ${entry.name}`);
     const sequence = Number(match[1]);
-    if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error(`invalid human review sequence: ${entry.name}`);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) throw new ReviewIntegrityError(`invalid human review sequence: ${entry.name}`);
     candidates.push({ name: entry.name, sequence });
   }
   candidates.sort((left, right) => left.sequence - right.sequence);
@@ -240,9 +246,17 @@ export async function readHumanReviewHistory(
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index]!;
     const expectedSequence = index + 1;
-    if (candidate.sequence !== expectedSequence) throw new Error("human review journal sequence is not contiguous");
-    const parsed = JSON.parse(await fs.readFile(path.join(directory, candidate.name), "utf8")) as unknown;
-    const record = validateReviewRecord(parsed, expectedSequence, currentStatus, source);
+    if (candidate.sequence !== expectedSequence) throw new ReviewIntegrityError("human review journal sequence is not contiguous");
+    let record: HumanReviewAuditRecord;
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(directory, candidate.name), "utf8")) as unknown;
+      record = validateReviewRecord(parsed, expectedSequence, currentStatus, source);
+    } catch (error) {
+      throw new ReviewIntegrityError(
+        error instanceof Error ? error.message : "human review journal is corrupt",
+        { cause: error },
+      );
+    }
     history.push(record);
     currentStatus = record.status;
   }

@@ -29,6 +29,7 @@ import {
 } from "../../src/report/index.js";
 import { createCompleteReportFixture, removeReportFixture } from "../report/helpers.js";
 import { createReviewFixture, removeReviewFixture } from "../review/helpers.js";
+import { humanReviewRecordRef } from "../../src/review/index.js";
 
 const roots: string[] = [];
 
@@ -167,10 +168,15 @@ function application(input: {
   readonly operationId?: string;
   readonly generator?: Parameters<typeof createLabApplication>[0]["exploratoryGenerator"];
   readonly diagnostics?: DiagnosticResult;
+  readonly openStore?: Parameters<typeof createLabApplication>[0]["openEvidenceStore"];
+  readonly promptDiscovery?: Parameters<typeof createLabApplication>[0]["promptDiscovery"];
+  readonly benchmarkDiscovery?: Parameters<typeof createLabApplication>[0]["benchmarkDiscovery"];
 } = {}) {
   let tick = 0;
   return createLabApplication({
-    openEvidenceStore,
+    openEvidenceStore: input.openStore ?? openEvidenceStore,
+    ...(input.promptDiscovery === undefined ? {} : { promptDiscovery: input.promptDiscovery }),
+    ...(input.benchmarkDiscovery === undefined ? {} : { benchmarkDiscovery: input.benchmarkDiscovery }),
     ...(input.backend === undefined ? {} : {
       executionBackendFactory: async () => input.backend!,
       agentExecutor: executor,
@@ -216,6 +222,33 @@ describe("LabApplication", () => {
     expect(prompts.map(({ definition }) => definition.id)).toEqual(["09-01-implementer-story"]);
     expect(benchmarks).toHaveLength(1);
     expect(benchmarks[0]?.testCase.input).not.toContain("format:");
+  });
+
+  it("classe les erreurs de lookup et valide le fingerprint avant toute execution", async () => {
+    const root = await temporaryRoot();
+    const targetPath = path.join(root, "target");
+    await fs.mkdir(targetPath);
+    const app = application({ backend: new FakeBackend() });
+    expect(() => app.startExperiment({ evidenceStoreDir: path.join(root, "store"), planFingerprint: "abc", targetPath }))
+      .toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+    await expect(app.startExperiment({
+      evidenceStoreDir: path.join(root, "store"),
+      planFingerprint: "a".repeat(64),
+      targetPath,
+    }).completion).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(application().discoverPrompts({ playbookDir: path.join(root, "missing") }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(application({
+      promptDiscovery: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    }).discoverPrompts({ playbookDir: root }))
+      .rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
+    await expect(application().discoverPrompts({ playbookDir: root, selector: "" }))
+      .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    await expect(application({
+      promptDiscovery: async () => [],
+      benchmarkDiscovery: async () => { throw Object.assign(new Error("denied"), { code: "EIO" }); },
+    }).discoverBenchmarks({ playbookDir: root, benchmarksDir: root }))
+      .rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
   });
 
   it("genere des cas lossless avec un generator injecte et refuse la capability absente", async () => {
@@ -426,6 +459,76 @@ describe("LabApplication", () => {
       })).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
     } finally {
       await removeReportFixture(fixture);
+    }
+  });
+
+  it("classe les erreurs I/O apres ouverture du store comme infrastructure", async () => {
+    const root = await temporaryRoot();
+    const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+    const store = {
+      root: path.join(root, "store"),
+      async readPlan() { throw denied; },
+      async readArtifact() { throw denied; },
+    } as unknown as FilesystemEvidenceStore;
+    const app = application({ openStore: async () => store });
+    const planFingerprint = "a".repeat(64);
+    await expect(app.buildReport({ evidenceStoreDir: store.root, planFingerprint }))
+      .rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
+    await expect(app.readCurrentReview({ evidenceStoreDir: store.root, planFingerprint, plannedRunId: "run" }))
+      .rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
+    await expect(app.promoteCase({
+      evidenceStoreDir: store.root,
+      benchmarksDir: root,
+      planFingerprint,
+      plannedRunId: "run",
+      fixedCaseId: "fixed-case",
+      title: "Fixed case",
+      expectation: "implementation",
+      promotedBy: "human",
+    })).rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
+    await expect(app.readArtifact({
+      evidenceStoreDir: store.root,
+      reference: `blobs/sha256/${"b".repeat(64)}`,
+    })).rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
+  });
+
+  it("distingue conflit de promotion et corruption de revue/promotion", async () => {
+    const fixture = await createReviewFixture({ id: "application-error-boundaries" });
+    try {
+      const app = application();
+      const plannedRunId = fixture.plan.plannedRuns[0]!.id;
+      const promotion = {
+        evidenceStoreDir: fixture.storeRoot,
+        benchmarksDir: fixture.benchmarksDir,
+        planFingerprint: fixture.plan.fingerprint,
+        plannedRunId,
+        fixedCaseId: "error-boundary-case",
+        title: "Error boundary case",
+        expectation: "implementation" as const,
+        promotedBy: "human",
+      };
+      await expect(app.promoteCase(promotion)).rejects.toMatchObject({ code: "CONFLICT" });
+      const review = await app.reviewRun({
+        evidenceStoreDir: fixture.storeRoot,
+        planFingerprint: fixture.plan.fingerprint,
+        plannedRunId,
+        status: "rejected",
+        reviewer: "human",
+      });
+      const reviewPath = path.join(fixture.storeRoot, ...humanReviewRecordRef(
+        fixture.plan.fingerprint,
+        plannedRunId,
+        review.sequence,
+      ).split("/"));
+      await fs.writeFile(reviewPath, "{}\n", "utf8");
+      await expect(app.readCurrentReview({
+        evidenceStoreDir: fixture.storeRoot,
+        planFingerprint: fixture.plan.fingerprint,
+        plannedRunId,
+      })).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
+      await expect(app.promoteCase(promotion)).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
+    } finally {
+      await removeReviewFixture(fixture);
     }
   });
 

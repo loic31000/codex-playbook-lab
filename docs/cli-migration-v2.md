@@ -25,6 +25,12 @@ typed `CAPABILITY_UNAVAILABLE` error until such providers are configured.
 All V2 commands support `--json`. Application errors map centrally to stable
 exit codes:
 
+Configuration JSON syntax and configuration value errors are
+`INVALID_ARGUMENT`; configuration filesystem failures are
+`INFRASTRUCTURE_FAILURE`. In JSON mode the bootstrap uses the same structured
+error envelope as command dispatch. `artifact show --text --json` is rejected
+as `INVALID_ARGUMENT`, so JSON mode never emits raw artifact text.
+
 | Error | Exit code |
 | --- | ---: |
 | success | 0 |

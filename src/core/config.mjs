@@ -5,6 +5,14 @@ import { fileURLToPath } from 'node:url';
 
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+export class ConfigInvalidError extends Error {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'ConfigInvalidError';
+    this.code = 'ERR_CONFIG_INVALID';
+  }
+}
+
 export function resolvePortablePath(value, base = projectRoot, pathApi = path) {
   if (!value) return base;
   return pathApi.isAbsolute(value) ? pathApi.normalize(value) : pathApi.resolve(base, value);
@@ -17,12 +25,15 @@ export async function loadConfig(options = {}) {
   try {
     raw = JSON.parse(await readFile(configPath, 'utf8'));
   } catch (error) {
-    if (error.code !== 'ENOENT') throw new Error(`Configuration invalide (${configPath}) : ${error.message}`);
+    if (error.code === 'ENOENT') raw = {};
+    else if (error instanceof SyntaxError) {
+      throw new ConfigInvalidError(`Configuration invalide (${configPath})`, { cause: error });
+    } else throw error;
   }
 
   const casesPerPrompt = Number(raw.cases_per_prompt ?? 1);
   if (!Number.isInteger(casesPerPrompt) || casesPerPrompt < 1) {
-    throw new Error('cases_per_prompt doit être un entier positif.');
+    throw new ConfigInvalidError('cases_per_prompt doit être un entier positif.');
   }
 
   return {

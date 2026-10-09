@@ -187,6 +187,9 @@ async function dispatch(parsed: ParsedCliArguments, dependencies: CliDependencie
     return 0;
   }
   if (command === "artifact" && subcommand === "show") {
+    if (parsed.options.text === true && isJson(parsed)) {
+      throw new ApplicationError("INVALID_ARGUMENT", "--text and --json cannot be combined");
+    }
     const result = await application.readArtifact({
       evidenceStoreDir: requiredOption(parsed, "store", defaults.evidenceStoreDir),
       reference: requiredOption(parsed, "ref"),
@@ -214,3 +217,4 @@ export async function main(argv: readonly string[], dependencies: CliDependencie
 
 export * from "./parser.js";
 export * from "./render.js";
+export * from "./bootstrap.js";

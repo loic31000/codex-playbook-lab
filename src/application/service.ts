@@ -39,6 +39,11 @@ import {
   type ExperimentReport,
 } from "../report/index.js";
 import {
+  PromotionConflictError,
+  PromotionIntegrityError,
+  ReviewConflictError,
+  ReviewIntegrityError,
+  ReviewNotFoundError,
   promoteGeneratedCase,
   readCurrentHumanReview,
   readHumanReviewHistory,
@@ -50,7 +55,16 @@ import {
   type PromotionExpectation,
 } from "../review/index.js";
 import type { DiagnosticInput, DiagnosticResult } from "./diagnostics.js";
-import { ApplicationError, applicationError, requireNonEmpty } from "./errors.js";
+import {
+  ApplicationError,
+  applicationError,
+  isInfrastructureError,
+  isNotFoundError,
+  mapIntegrityReadError,
+  mapLookupError,
+  requireNonEmpty,
+  requireSha256,
+} from "./errors.js";
 import { jsonObject, type ApplicationEvent, type ApplicationEventType } from "./events.js";
 import type { ApplicationDependencies } from "./ports.js";
 
@@ -174,10 +188,18 @@ export class LabApplication {
     readonly playbookDir: string;
     readonly selector?: string;
   }): Promise<readonly DiscoveredPrompt[]> {
+    const playbookDir = requireNonEmpty(input.playbookDir, "playbookDir");
+    if (input.selector !== undefined) requireNonEmpty(input.selector, "selector");
+    let prompts: readonly DiscoveredPrompt[];
     try {
-      return selectPrompts(await discoverPrompts(requireNonEmpty(input.playbookDir, "playbookDir")), input.selector);
+      prompts = await (this.dependencies.promptDiscovery ?? discoverPrompts)(playbookDir);
     } catch (error) {
-      throw applicationError(error, error instanceof TypeError ? "INVALID_ARGUMENT" : "NOT_FOUND", "prompt discovery failed");
+      throw mapLookupError(error, "prompt discovery failed");
+    }
+    try {
+      return selectPrompts(prompts, input.selector);
+    } catch (error) {
+      throw applicationError(error, error instanceof TypeError ? "INVALID_ARGUMENT" : "NOT_FOUND", "prompt selector did not match");
     }
   }
 
@@ -186,12 +208,20 @@ export class LabApplication {
     readonly benchmarksDir: string;
     readonly selector?: string;
   }): Promise<readonly FixedBenchmarkDefinition[]> {
+    const playbookDir = requireNonEmpty(input.playbookDir, "playbookDir");
+    const benchmarksDir = requireNonEmpty(input.benchmarksDir, "benchmarksDir");
+    if (input.selector !== undefined) requireNonEmpty(input.selector, "selector");
+    let benchmarks: readonly FixedBenchmarkDefinition[];
     try {
-      const prompts = await discoverPrompts(requireNonEmpty(input.playbookDir, "playbookDir"));
-      const benchmarks = await discoverFixedBenchmarks(requireNonEmpty(input.benchmarksDir, "benchmarksDir"), prompts);
+      const prompts = await (this.dependencies.promptDiscovery ?? discoverPrompts)(playbookDir);
+      benchmarks = await (this.dependencies.benchmarkDiscovery ?? discoverFixedBenchmarks)(benchmarksDir, prompts);
+    } catch (error) {
+      throw mapLookupError(error, "benchmark discovery failed");
+    }
+    try {
       return selectFixedBenchmarks(benchmarks, input.selector);
     } catch (error) {
-      throw applicationError(error, error instanceof TypeError ? "INVALID_ARGUMENT" : "NOT_FOUND", "benchmark discovery failed");
+      throw applicationError(error, error instanceof TypeError ? "INVALID_ARGUMENT" : "NOT_FOUND", "benchmark selector did not match");
     }
   }
 
@@ -246,14 +276,14 @@ export class LabApplication {
   }
 
   startExperiment(input: StartExperimentInput, resume = false): ApplicationOperation {
-    if (!this.dependencies.executionBackendFactory || !this.dependencies.agentExecutor) {
-      throw new ApplicationError("CAPABILITY_UNAVAILABLE", "V2 experiment execution provider is not configured");
-    }
     requireNonEmpty(input.evidenceStoreDir, "evidenceStoreDir");
-    requireNonEmpty(input.planFingerprint, "planFingerprint");
+    requireSha256(input.planFingerprint, "planFingerprint");
     requireNonEmpty(input.targetPath, "targetPath");
     const id = input.operationId ?? this.createOperationId();
     requireNonEmpty(id, "operationId");
+    if (!this.dependencies.executionBackendFactory || !this.dependencies.agentExecutor) {
+      throw new ApplicationError("CAPABILITY_UNAVAILABLE", "V2 experiment execution provider is not configured");
+    }
     if (this.activeOperations.has(id)) throw new ApplicationError("CONFLICT", `operation ${id} is already active`);
     const active: ActiveOperation = { controller: new AbortController(), sequence: 0 };
     this.activeOperations.set(id, active);
@@ -298,7 +328,11 @@ export class LabApplication {
     } catch (error) {
       const mapped = active.controller.signal.aborted
         ? new ApplicationError("CANCELLED", `operation ${operationId} was cancelled`, { cause: error })
-        : applicationError(error, "INFRASTRUCTURE_FAILURE", `operation ${operationId} failed`);
+        : isNotFoundError(error)
+          ? applicationError(error, "NOT_FOUND", `operation ${operationId} plan was not found`)
+          : error instanceof TypeError
+            ? applicationError(error, "DATA_INTEGRITY_FAILURE", `operation ${operationId} source is invalid`)
+            : applicationError(error, "INFRASTRUCTURE_FAILURE", `operation ${operationId} failed`);
       await this.emit("operation_failed", { code: mapped.code }, operationId);
       throw mapped;
     } finally {
@@ -325,10 +359,11 @@ export class LabApplication {
     readonly evidenceStoreDir: string;
     readonly planFingerprint: string;
   }): Promise<BuildReportResult> {
+    requireSha256(input.planFingerprint, "planFingerprint");
     try {
       const structured = await buildExperimentReport({
         store: await this.store(input.evidenceStoreDir),
-        planFingerprint: requireNonEmpty(input.planFingerprint, "planFingerprint"),
+        planFingerprint: input.planFingerprint,
       });
       const result = {
         structured,
@@ -338,11 +373,14 @@ export class LabApplication {
       await this.emit("report_built", { planFingerprint: structured.plan.fingerprint, complete: structured.completeness.complete });
       return result;
     } catch (error) {
-      throw applicationError(error, "DATA_INTEGRITY_FAILURE", "report source is invalid or unavailable");
+      throw mapIntegrityReadError(error, "report source is invalid or unavailable");
     }
   }
 
   async reviewRun(input: ReviewRunInput): Promise<HumanReviewAuditRecord> {
+    requireSha256(input.planFingerprint, "planFingerprint");
+    requireNonEmpty(input.plannedRunId, "plannedRunId");
+    requireNonEmpty(input.reviewer, "reviewer");
     try {
       const record = await recordHumanReview({
         store: await this.store(input.evidenceStoreDir),
@@ -363,27 +401,42 @@ export class LabApplication {
       });
       return record;
     } catch (error) {
+      if (isInfrastructureError(error)) throw applicationError(error, "INFRASTRUCTURE_FAILURE", "human review failed");
+      if (isNotFoundError(error) || error instanceof ReviewNotFoundError) throw applicationError(error, "NOT_FOUND", "human review source was not found");
+      if (error instanceof ReviewConflictError) throw applicationError(error, "CONFLICT", "human review state is incompatible");
+      if (error instanceof ReviewIntegrityError) throw applicationError(error, "DATA_INTEGRITY_FAILURE", "human review source is invalid");
       throw applicationError(error, error instanceof TypeError ? "INVALID_ARGUMENT" : "DATA_INTEGRITY_FAILURE", "human review failed");
     }
   }
 
   async readCurrentReview(input: ReadReviewInput): Promise<CurrentHumanReview> {
+    requireSha256(input.planFingerprint, "planFingerprint");
+    requireNonEmpty(input.plannedRunId, "plannedRunId");
     try {
       return await readCurrentHumanReview({ store: await this.store(input.evidenceStoreDir), ...input });
     } catch (error) {
-      throw applicationError(error, "DATA_INTEGRITY_FAILURE", "human review source is invalid");
+      if (error instanceof ReviewNotFoundError) throw applicationError(error, "NOT_FOUND", "human review source was not found");
+      if (error instanceof ReviewConflictError) throw applicationError(error, "CONFLICT", "human review state is incompatible");
+      throw mapIntegrityReadError(error, "human review source is invalid");
     }
   }
 
   async readReviewHistory(input: ReadReviewInput): Promise<readonly HumanReviewAuditRecord[]> {
+    requireSha256(input.planFingerprint, "planFingerprint");
+    requireNonEmpty(input.plannedRunId, "plannedRunId");
     try {
       return await readHumanReviewHistory({ store: await this.store(input.evidenceStoreDir), ...input });
     } catch (error) {
-      throw applicationError(error, "DATA_INTEGRITY_FAILURE", "human review history is invalid");
+      if (error instanceof ReviewNotFoundError) throw applicationError(error, "NOT_FOUND", "human review source was not found");
+      if (error instanceof ReviewConflictError) throw applicationError(error, "CONFLICT", "human review state is incompatible");
+      throw mapIntegrityReadError(error, "human review history is invalid");
     }
   }
 
   async promoteCase(input: PromoteCaseInput): Promise<PromotedGeneratedCaseResult> {
+    requireSha256(input.planFingerprint, "planFingerprint");
+    requireNonEmpty(input.plannedRunId, "plannedRunId");
+    requireNonEmpty(input.benchmarksDir, "benchmarksDir");
     try {
       const result = await promoteGeneratedCase({
         store: await this.store(input.evidenceStoreDir),
@@ -408,7 +461,12 @@ export class LabApplication {
       });
       return result;
     } catch (error) {
-      throw applicationError(error, error instanceof TypeError ? "INVALID_ARGUMENT" : "CONFLICT", "case promotion failed");
+      if (isInfrastructureError(error)) throw applicationError(error, "INFRASTRUCTURE_FAILURE", "case promotion failed");
+      if (error instanceof ReviewNotFoundError) throw applicationError(error, "NOT_FOUND", "promotion source was not found");
+      if (error instanceof PromotionConflictError || error instanceof ReviewConflictError) throw applicationError(error, "CONFLICT", "case promotion state is incompatible");
+      if (error instanceof PromotionIntegrityError || error instanceof ReviewIntegrityError) throw applicationError(error, "DATA_INTEGRITY_FAILURE", "case promotion source is invalid");
+      if (isNotFoundError(error) || error instanceof TypeError) throw applicationError(error, "INVALID_ARGUMENT", "case promotion input is invalid");
+      throw applicationError(error, "INTERNAL_ERROR", "case promotion failed");
     }
   }
 
@@ -424,8 +482,13 @@ export class LabApplication {
         bytesBase64: bytes.toString("base64"),
       };
     } catch (error) {
-      const nodeCode = (error as NodeJS.ErrnoException)?.code;
-      const code = error instanceof TypeError ? "INVALID_ARGUMENT" : nodeCode === "ENOENT" ? "NOT_FOUND" : "DATA_INTEGRITY_FAILURE";
+      const code = error instanceof TypeError
+        ? "INVALID_ARGUMENT"
+        : isInfrastructureError(error)
+          ? "INFRASTRUCTURE_FAILURE"
+          : isNotFoundError(error)
+            ? "NOT_FOUND"
+            : "DATA_INTEGRITY_FAILURE";
       throw applicationError(error, code, "artifact could not be read");
     }
   }

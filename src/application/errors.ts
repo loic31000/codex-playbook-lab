@@ -65,3 +65,45 @@ export function requireNonEmpty(value: string, field: string): string {
   }
   return value;
 }
+
+const INFRASTRUCTURE_ERRNOS = new Set([
+  "EACCES", "EPERM", "EIO", "ENOSPC", "EROFS", "EMFILE", "ENFILE",
+  "EBUSY", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH",
+]);
+
+export function nodeErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  if ("code" in error && typeof error.code === "string") return error.code;
+  return "cause" in error ? nodeErrorCode(error.cause) : undefined;
+}
+
+export function isInfrastructureError(error: unknown): boolean {
+  return INFRASTRUCTURE_ERRNOS.has(nodeErrorCode(error) ?? "");
+}
+
+export function isNotFoundError(error: unknown): boolean {
+  return nodeErrorCode(error) === "ENOENT";
+}
+
+export function requireSha256(value: string, field: string): string {
+  requireNonEmpty(value, field);
+  if (!/^[a-f0-9]{64}$/.test(value)) {
+    throw new ApplicationError("INVALID_ARGUMENT", `${field} must be a lowercase SHA-256 fingerprint`);
+  }
+  return value;
+}
+
+export function mapLookupError(error: unknown, message: string): ApplicationError {
+  if (error instanceof ApplicationError) return error;
+  if (error instanceof TypeError) return applicationError(error, "INVALID_ARGUMENT", message);
+  if (isInfrastructureError(error)) return applicationError(error, "INFRASTRUCTURE_FAILURE", message);
+  if (isNotFoundError(error)) return applicationError(error, "NOT_FOUND", message);
+  return applicationError(error, "INTERNAL_ERROR", message);
+}
+
+export function mapIntegrityReadError(error: unknown, message: string): ApplicationError {
+  if (error instanceof ApplicationError) return error;
+  if (isInfrastructureError(error)) return applicationError(error, "INFRASTRUCTURE_FAILURE", message);
+  if (isNotFoundError(error)) return applicationError(error, "NOT_FOUND", message);
+  return applicationError(error, "DATA_INTEGRITY_FAILURE", message);
+}

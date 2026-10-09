@@ -34,7 +34,7 @@ function parse(argv) {
   return { command: positional[0], selector: positional[1], options };
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function legacyMain(argv = process.argv.slice(2)) {
   let { command, selector, options } = parse(argv);
   if (!command) {
     const choice = await mainMenu();
@@ -59,6 +59,44 @@ export async function main(argv = process.argv.slice(2)) {
     await saveAndValidateRun({ repoDir: config.repoDir, runDir, label: options.name }); return 0;
   }
   throw new Error(`Commande inconnue : ${command ?? '(vide)'}`);
+}
+
+let applicationModules;
+
+async function loadApplicationModules() {
+  if (!applicationModules) {
+    await import('tsx/esm');
+    applicationModules = Promise.all([
+      import('./cli/index.ts'),
+      import('./cli/production.ts'),
+    ]);
+  }
+  return applicationModules;
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const [{ main: applicationMain }, { createProductionLabApplication }] = await loadApplicationModules();
+  const parsed = parse(argv);
+  const config = await loadConfig({ configPath: parsed.options.configPath });
+  const application = createProductionLabApplication();
+  return applicationMain(argv, {
+    application,
+    stdout: process.stdout,
+    stderr: process.stderr,
+    defaults: {
+      repoDir: config.repoDir,
+      playbookDir: config.playbookDir,
+      evidenceStoreDir: config.resultsDir,
+      ...(config.benchmarksDir === null ? {} : { benchmarksDir: config.benchmarksDir }),
+    },
+    signals: {
+      onSigint(handler) {
+        process.on('SIGINT', handler);
+        return () => process.off('SIGINT', handler);
+      },
+    },
+    legacyMain,
+  });
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

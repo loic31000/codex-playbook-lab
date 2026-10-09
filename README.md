@@ -59,14 +59,14 @@ sans contradiction.
 | --- | --- |
 | Architecture native Codex / isolation | ✅ validée par #37 et #39 |
 | Domaine Experiment / Evidence / revue humaine (#23) | ✅ mergé via #40 |
-| Strict runner production (#24) | 🚧 en cours |
-| Benchmarks fixes (#25) | à venir |
-| Cas exploratoires générés (#26) | à venir |
-| Orchestration d'expériences (#27) | à venir |
-| Evidence persistée / reprise (#28) | à venir |
-| Revue humaine / promotion (#29) | implémentée sur la branche dédiée |
-| Rapport factuel (#30) | implémenté sur la branche dédiée |
-| Couche applicative / CLI (#31) | à venir |
+| Strict runner production (#24) | ✅ terminé |
+| Benchmarks fixes (#25) | ✅ terminé |
+| Cas exploratoires générés (#26) | ✅ terminé |
+| Orchestration d'expériences (#27) | ✅ terminé |
+| Evidence persistée / reprise (#28) | ✅ terminé |
+| Revue humaine / promotion (#29) | ✅ terminé |
+| Rapport factuel (#30) | ✅ terminé |
+| Couche applicative / CLI (#31) | 🚧 en cours sur la branche dédiée |
 | API / événements (#32) | à venir |
 | GUI (#33) | à venir |
 | CI / campagne finale / cutover (#34) | à venir |
@@ -121,7 +121,7 @@ Ce résultat ne constitue pas une garantie universelle pour toutes les plateform
 
 Toute évolution de la frontière d'exécution ou de la version Codex doit être revalidée.
 
-L'issue #24 transforme actuellement cette preuve en **runner production réutilisable**. Le code de production ne doit pas dépendre des fichiers du spike.
+L'issue #24 a transformé cette preuve en **strict runner production réutilisable**. Le code de production ne dépend pas des fichiers du spike.
 
 ## Modèle métier V2
 
@@ -144,7 +144,7 @@ La fondation mergée dans `src/domain/` introduit notamment :
 
 Le repository du Lab n'est jamais un target implicite.
 
-Un target doit être fourni explicitement par l'appelant. Le futur strict runner doit travailler sur un snapshot indépendant : le dépôt source ne doit pas être modifié par l'agent.
+Un target doit être fourni explicitement par l'appelant. Le strict runner travaille sur un snapshot indépendant : le dépôt source ne doit pas être modifié par l'agent.
 
 ### FixedCase et GeneratedCase
 
@@ -166,10 +166,18 @@ Les zones importantes pendant la migration V2 sont :
 
 ```text
 src/
-├── domain/                 # domaine V2 déjà intégré
+├── application/            # use cases communs CLI / future API / future GUI
+├── cli/                    # adaptateur CLI V2 TypeScript
+├── domain/                 # domaine V2
+├── evidence/               # preuves, manifests et reprise durables
+├── experiment/             # plans et orchestration A/B
+├── fixed/                  # prompts et benchmarks fixes
+├── explore/                # cas exploratoires traçables
+├── review/                 # revue humaine et promotion
+├── report/                 # rapport factuel
 ├── core/                   # moteur historique V1, conservé jusqu'au cutover
 ├── platform/               # helpers plateforme historiques
-└── runner/                 # futur strict runner (#24), en cours de construction
+└── runner/                 # strict runner (#24)
 
 spikes/
 └── codex-app-exec/         # preuve historique de l'architecture native retenue
@@ -286,6 +294,36 @@ En particulier, les anciennes stratégies basées sur `workspace-write`, bind mo
 
 Pour la documentation du produit stable actuel, consulter le README de `main`.
 
+## Couche Application et CLI V2
+
+La tranche #31 introduit `LabApplication`, frontière commune pour la CLI et les
+futures API/GUI. Elle orchestre les modules #23–#30 sans en dupliquer la logique
+et retourne uniquement des valeurs structurées, des erreurs typées et des
+événements factuels JSON-compatibles.
+
+Les nouvelles commandes sont regroupées dans des namespaces explicites :
+
+```text
+codex-lab diagnostics
+codex-lab prompts list
+codex-lab benchmarks list
+codex-lab experiment create|run|resume|report
+codex-lab cases generate
+codex-lab review set
+codex-lab promote
+codex-lab artifact show
+```
+
+`--json` produit une sortie structurée sans ANSI. Un `SIGINT` pendant une
+opération V2 demande son annulation, laisse l'orchestrateur checkpointé terminer
+la transition, puis retourne le code 130.
+
+Il n'existe pas encore de provider production complet pour l'agent V2 ou le
+générateur exploratoire. Les capacités concernées retournent donc
+`CAPABILITY_UNAVAILABLE`; aucun fallback V1 n'est effectué. La matrice complète
+des aliases et migrations se trouve dans
+[`docs/cli-migration-v2.md`](docs/cli-migration-v2.md).
+
 ## Authentification
 
 La V2 retenue utilise l'authentification ChatGPT côté host avec Codex app-server.
@@ -328,7 +366,8 @@ C'est précisément ce découplage qui permet de conserver le contrôle de l'age
 - #37 — Codex app-server / exec-server natif : **base retenue sous condition d'isolation réseau** ;
 - #38 / #39 — stdio + `--network none` : **H2-A — PASS** ;
 - #23 / #40 — domaine Experiment / Evidence / human review : **intégré** ;
-- #24 — strict runner production : **en cours**.
+- #24–#30 — strict runner, benchmarks, exploration, orchestration, preuves, revue et rapport : **terminés** ;
+- #31 — couche Application et CLI V2 : **en cours sur la branche dédiée**.
 
 Les spikes restent consultables pour comprendre les preuves, mais ils ne définissent pas l'API production.
 

@@ -149,6 +149,24 @@ describe("CLI V2 adapter", () => {
     expect(artifact.stdout.value).toBe("");
   });
 
+  it("rend un conflit de checkpoint experiment run en JSON avec exit 4", async () => {
+    const h = harness({
+      startExperiment() {
+        return {
+          id: "checkpoint-conflict",
+          completion: Promise.reject(new ApplicationError("CONFLICT", "stored state conflict")),
+        } as never;
+      },
+    });
+    expect(await main([
+      "experiment", "run", "--plan", "a".repeat(64), "--target", "target", "--json",
+    ], h.dependencies)).toBe(4);
+    expect(JSON.parse(h.stderr.value)).toEqual({
+      error: { code: "CONFLICT", category: "state", message: "stored state conflict" },
+    });
+    expect(h.stdout.value).toBe("");
+  });
+
   it("rend une erreur bootstrap EACCES en JSON infrastructure", async () => {
     const stdout = new BufferWriter();
     const stderr = new BufferWriter();

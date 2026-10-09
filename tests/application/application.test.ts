@@ -309,6 +309,34 @@ describe("LabApplication", () => {
     expect(app.activeOperationIds()).toEqual([]);
   });
 
+  it("classe un second run sans resume comme CONFLICT et preserve resume", async () => {
+    const root = await temporaryRoot();
+    const storeRoot = path.join(root, "store");
+    const targetPath = path.join(root, "target");
+    await fs.mkdir(targetPath);
+    const firstBackend = new FakeBackend();
+    const app = application({ backend: firstBackend, operationId: "checkpoint-operation" });
+    const created = await persistedPlan(app, storeRoot, "checkpoint-conflict-plan");
+    await app.startExperiment({ evidenceStoreDir: storeRoot, planFingerprint: created.planFingerprint, targetPath }).completion;
+
+    await expect(app.startExperiment({
+      evidenceStoreDir: storeRoot,
+      planFingerprint: created.planFingerprint,
+      targetPath,
+    }).completion).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(app.activeOperationIds()).toEqual([]);
+
+    const resumedBackend = new FakeBackend();
+    const resumed = application({ backend: resumedBackend, operationId: "resume-checkpoint-operation" });
+    await expect(resumed.resumeExperiment({
+      evidenceStoreDir: storeRoot,
+      planFingerprint: created.planFingerprint,
+      targetPath,
+    }).completion).resolves.toMatchObject({ status: "completed" });
+    expect(resumedBackend.executed).toEqual([]);
+    expect(resumed.activeOperationIds()).toEqual([]);
+  });
+
   it("reprend apres crash sans rejouer le run terminal", async () => {
     const root = await temporaryRoot();
     const storeRoot = path.join(root, "store");
@@ -476,6 +504,13 @@ describe("LabApplication", () => {
       .rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
     await expect(app.readCurrentReview({ evidenceStoreDir: store.root, planFingerprint, plannedRunId: "run" }))
       .rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
+    await expect(app.reviewRun({
+      evidenceStoreDir: store.root,
+      planFingerprint,
+      plannedRunId: "run",
+      status: "rejected",
+      reviewer: "human",
+    })).rejects.toMatchObject({ code: "INFRASTRUCTURE_FAILURE" });
     await expect(app.promoteCase({
       evidenceStoreDir: store.root,
       benchmarksDir: root,
@@ -527,6 +562,90 @@ describe("LabApplication", () => {
         plannedRunId,
       })).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
       await expect(app.promoteCase(promotion)).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
+    } finally {
+      await removeReviewFixture(fixture);
+    }
+  });
+
+  it("classe les plans persistés corrompus comme intégrité pour review et promotion", async () => {
+    async function corruptPlan(storeRoot: string, fingerprint: string): Promise<void> {
+      const filename = path.join(storeRoot, "plans", fingerprint, "plan.json");
+      const record = JSON.parse(await fs.readFile(filename, "utf8")) as { plan: { experiments: unknown } };
+      record.plan.experiments = null;
+      await fs.writeFile(filename, `${JSON.stringify(record)}\n`, "utf8");
+    }
+
+    const reviewFixture = await createReviewFixture({ id: "application-corrupt-review-plan" });
+    try {
+      await corruptPlan(reviewFixture.storeRoot, reviewFixture.plan.fingerprint);
+      await expect(reviewFixture.store.readPlan(reviewFixture.plan.fingerprint)).rejects.toBeInstanceOf(TypeError);
+      await expect(application().reviewRun({
+        evidenceStoreDir: reviewFixture.storeRoot,
+        planFingerprint: reviewFixture.plan.fingerprint,
+        plannedRunId: reviewFixture.plan.plannedRuns[0]!.id,
+        status: "rejected",
+        reviewer: "human",
+      })).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
+    } finally {
+      await removeReviewFixture(reviewFixture);
+    }
+
+    const promotionFixture = await createReviewFixture({ id: "application-corrupt-promotion-plan" });
+    try {
+      await corruptPlan(promotionFixture.storeRoot, promotionFixture.plan.fingerprint);
+      await expect(application().promoteCase({
+        evidenceStoreDir: promotionFixture.storeRoot,
+        benchmarksDir: promotionFixture.benchmarksDir,
+        planFingerprint: promotionFixture.plan.fingerprint,
+        plannedRunId: promotionFixture.plan.plannedRuns[0]!.id,
+        fixedCaseId: "corrupt-source-case",
+        title: "Corrupt source case",
+        expectation: "implementation",
+        promotedBy: "human",
+      })).rejects.toMatchObject({ code: "DATA_INTEGRITY_FAILURE" });
+    } finally {
+      await removeReviewFixture(promotionFixture);
+    }
+  });
+
+  it("conserve les inputs review et promotion invalides en INVALID_ARGUMENT", async () => {
+    const fixture = await createReviewFixture({ id: "application-invalid-human-inputs" });
+    try {
+      const app = application();
+      const baseReview = {
+        evidenceStoreDir: fixture.storeRoot,
+        planFingerprint: fixture.plan.fingerprint,
+        plannedRunId: fixture.plan.plannedRuns[0]!.id,
+        status: "rejected" as const,
+        reviewer: "human",
+      };
+      await expect(app.reviewRun({ ...baseReview, status: "unknown" as never }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      await expect(app.reviewRun({ ...baseReview, reviewer: "" }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      await expect(app.reviewRun({ ...baseReview, reviewedAt: "yesterday" }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+
+      const basePromotion = {
+        evidenceStoreDir: fixture.storeRoot,
+        benchmarksDir: fixture.benchmarksDir,
+        planFingerprint: fixture.plan.fingerprint,
+        plannedRunId: fixture.plan.plannedRuns[0]!.id,
+        fixedCaseId: "valid-case",
+        title: "Valid case",
+        expectation: "implementation" as const,
+        promotedBy: "human",
+      };
+      await expect(app.promoteCase({ ...basePromotion, fixedCaseId: "Invalid ID" }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      await expect(app.promoteCase({ ...basePromotion, expectation: "unknown" as never }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      await expect(app.promoteCase({ ...basePromotion, title: "invalid\ntitle" }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      await expect(app.promoteCase({ ...basePromotion, promotedBy: "" }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      await expect(app.promoteCase({ ...basePromotion, promotedAt: "yesterday" }))
+        .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
     } finally {
       await removeReviewFixture(fixture);
     }

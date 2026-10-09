@@ -27,6 +27,10 @@ export interface RunStoredExperimentPlanInput {
   readonly storageHooks?: EvidenceStorageHooks;
 }
 
+export class StoredExperimentConflictError extends Error {
+  override readonly name = "StoredExperimentConflictError";
+}
+
 async function reconcileFinalizedAttempts(input: {
   readonly store: FilesystemEvidenceStore;
   readonly plan: ExperimentExecutionPlan;
@@ -81,7 +85,9 @@ export async function runStoredExperimentPlan(
   await input.store.writePlan(input.plan, [input.targetPath]);
   const latest = await input.store.readLatestCheckpoint(input.plan.fingerprint);
   if (!input.resume && latest.checkpoint) {
-    throw new Error("stored checkpoints already exist; explicitly request resume to continue this plan");
+    throw new StoredExperimentConflictError(
+      "stored checkpoints already exist; explicitly request resume to continue this plan",
+    );
   }
   const recordingBackend = new RecordingExperimentExecutionBackend({
     backend: input.backend,

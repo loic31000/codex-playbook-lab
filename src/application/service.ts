@@ -10,6 +10,7 @@ import {
 } from "../domain/index.js";
 import {
   runStoredExperimentPlan,
+  StoredExperimentConflictError,
   type ArtifactReference,
   type FilesystemEvidenceStore,
 } from "../evidence/index.js";
@@ -328,7 +329,9 @@ export class LabApplication {
     } catch (error) {
       const mapped = active.controller.signal.aborted
         ? new ApplicationError("CANCELLED", `operation ${operationId} was cancelled`, { cause: error })
-        : isNotFoundError(error)
+        : error instanceof StoredExperimentConflictError
+          ? applicationError(error, "CONFLICT", `operation ${operationId} conflicts with stored state`)
+          : isNotFoundError(error)
           ? applicationError(error, "NOT_FOUND", `operation ${operationId} plan was not found`)
           : error instanceof TypeError
             ? applicationError(error, "DATA_INTEGRITY_FAILURE", `operation ${operationId} source is invalid`)

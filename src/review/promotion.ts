@@ -19,6 +19,7 @@ import { humanReviewRecordFingerprint, readCurrentHumanReview } from "./human-re
 import {
   PromotionConflictError,
   PromotionIntegrityError,
+  ReviewConflictError,
   ReviewNotFoundError,
 } from "./errors.js";
 import {
@@ -151,7 +152,7 @@ async function assertFixedCaseIdAvailable(root: string, fixedCaseId: string): Pr
   }
 }
 
-async function resolvePromotionSource(input: PromoteGeneratedCaseInput): Promise<PromotionSource> {
+async function resolvePromotionSourceData(input: PromoteGeneratedCaseInput): Promise<PromotionSource> {
   let plan: ExperimentExecutionPlan;
   try {
     plan = await input.store.readPlan(input.planFingerprint);
@@ -215,6 +216,22 @@ async function resolvePromotionSource(input: PromoteGeneratedCaseInput): Promise
       review,
     },
   };
+}
+
+async function resolvePromotionSource(input: PromoteGeneratedCaseInput): Promise<PromotionSource> {
+  try {
+    return await resolvePromotionSourceData(input);
+  } catch (error) {
+    if (
+      error instanceof ReviewNotFoundError
+      || error instanceof ReviewConflictError
+      || error instanceof PromotionConflictError
+      || error instanceof PromotionIntegrityError
+    ) {
+      throw error;
+    }
+    throw new PromotionIntegrityError("promotion persisted source is invalid", { cause: error });
+  }
 }
 
 function promotionAuditFingerprint(record: CasePromotionAuditRecord): string {

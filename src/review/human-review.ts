@@ -106,7 +106,7 @@ function exactKeys(record: Record<string, unknown>, allowed: readonly string[], 
   }
 }
 
-async function resolveReviewSource(input: ReadHumanReviewInput): Promise<ReviewSource> {
+async function resolveReviewSourceData(input: ReadHumanReviewInput): Promise<ReviewSource> {
   const plan = await input.store.readPlan(input.planFingerprint);
   const plannedRun = plan.plannedRuns.find(({ id }) => id === input.plannedRunId);
   if (!plannedRun) throw new ReviewNotFoundError(`unknown PlannedRun ${input.plannedRunId}`);
@@ -141,6 +141,26 @@ async function resolveReviewSource(input: ReadHumanReviewInput): Promise<ReviewS
     manifestRef: attempt.summary.manifestRef,
     manifestFingerprint: sha256Canonical(attempt.manifest),
   };
+}
+
+async function resolveReviewSource(input: ReadHumanReviewInput): Promise<ReviewSource> {
+  if (!SHA256.test(input.planFingerprint)) throw new TypeError("planFingerprint must be SHA-256");
+  nonEmpty(input.plannedRunId, "plannedRunId");
+  try {
+    return await resolveReviewSourceData(input);
+  } catch (error) {
+    if (
+      error instanceof ReviewNotFoundError
+      || error instanceof ReviewConflictError
+      || error instanceof ReviewIntegrityError
+    ) {
+      throw error;
+    }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ReviewNotFoundError("human review plan was not found");
+    }
+    throw new ReviewIntegrityError("human review persisted source is invalid", { cause: error });
+  }
 }
 
 function validateReviewRecord(
